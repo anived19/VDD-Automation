@@ -5,7 +5,7 @@ generation. Given a vendor's KYC document folder (and/or its PAN/GSTIN/CIN),
 it resolves the "No-Consent" half of the Finoscale scoring model (Compliance,
 Proof of Address, Proof of Identity, Legal/AML — 50 of 100 points) using a
 mix of document extraction and the internal Finoscale Data API
-(`api.finoscale.ai` — Ongrid, Digitap, Probe42, Zigram), scores them per
+(`api.finoscale.ai` — Ongrid, Digitap, Probe42), scores them per
 `config/scoring_model.json`, and renders the finished branded HTML/PDF
 report directly — no manual dropdown entry in the platform UI.
 
@@ -29,7 +29,18 @@ a live investigation of the source, not an assumption:
 JSON API, all 44 tribunals, incl. SARFAESI s.17 applications) *are* automated
 — see `vdd/aml/india_legal.py`. Sanctions (OFAC / UN / EU FSF / World Bank)
 are in `vdd/aml/screening.py`. Every screener fails closed to
-"unscreened — not counted as clean" on any error.
+"unscreened — not counted as clean" on any error. OpenSanctions is wired up
+as a fifth source in that sweep but currently returns 401 (its free-tier
+search endpoints now require a paid key), so it contributes nothing — the
+free EU FSF / UN Consolidated List screeners carry that coverage instead.
+
+The Finoscale Data API also exposes a Zigram screening endpoint; the client
+supports it (`vdd/finoscale_api/client.py`) but `vdd/pipeline.py` does not
+call it, and no resolver reads its result. Live testing found its composite
+verdict didn't reconcile with the one check block it actually returned data
+for — see the `Zigram status` note in `resolve_aml`'s docstring
+(`vdd/resolve/resolvers.py`) for the full investigation. Re-enabling it needs
+an answer from whoever manages the Finoscale/Zigram account first.
 
 ## Setup
 
@@ -50,10 +61,18 @@ and re-run, or use WSL/Docker where GTK3 is a normal package install.
 
 ```
 python run_vendor.py --docs "path/to/vendor folder" --out out/
+python run_vendor.py --docs "..." --out out/ --no-api        # doc-extraction only, skip Finoscale API calls
+python run_vendor.py --docs "..." --scoring-model config/scoring_model.json --cache-dir cache
 ```
+
+`--cache-dir` (default `cache/`) caches both Finoscale API responses and OCR
+output across runs. Optional OCR fallbacks (`vdd/extract/ocr.py`) degrade
+gracefully when unavailable: Tesseract needs the binary on `PATH`
+(`pytesseract`), and the vision fallback needs `ANTHROPIC_API_KEY` set.
 
 ## Layout
 
+- `vdd/pipeline.py` — end-to-end orchestration: folder → extracted entity → API calls → resolved values → scored, rendered report. Never pauses for human input; every field resolves to a value or to "unresolved" with a reason, and anything resolved via inference or a judgment call is flagged in `cross_check_items` for post-hoc human review instead of blocking the run.
 - `vdd/extract/` — filename classification, OCR/text extraction, per-doc-type regex parsers
 - `vdd/finoscale_api/` — typed client for the internal Data API
 - `vdd/resolve/` — maps extracted docs + API responses to scoring-model canonical values
