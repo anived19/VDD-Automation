@@ -1,0 +1,13 @@
+requests>=2.31
+httpx[http2]>=0.27
+python-dotenv>=1.0
+PyMuPDF>=1.24
+Pillow>=11.0
+weasyprint>=69.0
+pdfplumber>=0.11
+pytest>=8.0
+
+# Optional OCR/vision fallbacks for extract/ocr.py -- code degrades gracefully
+# (marks the field unresolved) if these aren't installed / configured.
+pytesseract>=0.3      # also needs the Tesseract binary on PATH
+anthropic>=0.40        # also needs ANTHROPIC_API_KEY env var

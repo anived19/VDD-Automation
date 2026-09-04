@@ -1,0 +1,1202 @@
+{
+  "grades": [
+    {
+      "band": "HIGH TRUST",
+      "code": "FSA1",
+      "approval": "Level 1 Direct Onboarding",
+      "minScore": 85
+    },
+    {
+      "band": "MODERATE TRUST",
+      "code": "FSA2",
+      "approval": "Level 1 + Level 2 Review",
+      "minScore": 71
+    },
+    {
+      "band": "ACCEPTABLE",
+      "code": "FSB3",
+      "approval": "Full Underwriting Review",
+      "minScore": 61
+    },
+    {
+      "band": "CAUTION",
+      "code": "FSB4",
+      "approval": "3-Level Review + Additional Docs",
+      "minScore": 51
+    },
+    {
+      "band": "HIGH CAUTION",
+      "code": "FSB5",
+      "approval": "Hold — Pending Verification",
+      "minScore": 41
+    },
+    {
+      "band": "REJECT",
+      "code": "FSC6",
+      "approval": "Decline Application",
+      "minScore": 20
+    },
+    {
+      "band": "HARD REJECT",
+      "code": "FSC7",
+      "approval": "Immediate Decline — NO-GO",
+      "minScore": 0
+    }
+  ],
+  "modelName": "Finoscale Generic Scoring Model v8.0 — Human Entry",
+  "categories": [
+    {
+      "consent": false,
+      "categoryId": "compliance",
+      "parameters": [
+        {
+          "required": true,
+          "inputType": "category",
+          "dataSource": "human",
+          "conditional": false,
+          "parameterId": "com_gstin_active",
+          "parameterName": "GSTIN Active Status",
+          "scoreMappings": [
+            {
+              "expr": "value == \"active\"",
+              "condition": "Active",
+              "assignedScore": 1
+            },
+            {
+              "expr": "value == \"suspended\"",
+              "condition": "Suspended",
+              "assignedScore": 0
+            },
+            {
+              "expr": "value == \"cancelled\"",
+              "condition": "Cancelled / Suo Motu Cancelled",
+              "assignedScore": 0
+            },
+            {
+              "expr": "value == \"not_found\"",
+              "condition": "Not Found / Invalid GSTIN",
+              "assignedScore": 0
+            }
+          ],
+          "scoringMethod": "range",
+          "inputFieldName": "com_gstin_active",
+          "maxParameterScore": 1,
+          "parameterDescription": "Verify GSTIN status on gst.gov.in → Search Taxpayer. Submit canonical value: active | suspended | cancelled | not_found",
+          "parameterWeightWithinCategory": 1
+        },
+        {
+          "required": true,
+          "inputType": "number",
+          "dataSource": "human",
+          "conditional": false,
+          "parameterId": "com_gst_vintage",
+          "parameterName": "GST Registration Vintage / Age",
+          "scoreMappings": [
+            {
+              "expr": "value > 5",
+              "condition": "> 5 years",
+              "assignedScore": 5
+            },
+            {
+              "expr": "value IN [2, 5]",
+              "condition": "2 – 5 years",
+              "assignedScore": 3
+            },
+            {
+              "expr": "value IN [1, 2)",
+              "condition": "1 – 2 years",
+              "assignedScore": 2
+            },
+            {
+              "expr": "value IN [0.5, 1)",
+              "condition": "6 months – 1 year",
+              "assignedScore": 1
+            },
+            {
+              "expr": "value < 0.5",
+              "condition": "< 6 months",
+              "assignedScore": 0
+            }
+          ],
+          "scoringMethod": "range",
+          "inputFieldName": "com_gst_vintage",
+          "maxParameterScore": 5,
+          "parameterDescription": "Years since GST registration date from gst.gov.in. Submit as decimal years (e.g. 3.5).",
+          "parameterWeightWithinCategory": 1
+        },
+        {
+          "required": true,
+          "inputType": "category",
+          "dataSource": "human",
+          "conditional": false,
+          "parameterId": "com_gst_filing_compliance",
+          "parameterName": "GST 3B & R1 Filing — Last 12 Months",
+          "scoreMappings": [
+            {
+              "expr": "value == \"timely\"",
+              "condition": "Timely — all months on time",
+              "assignedScore": 5
+            },
+            {
+              "expr": "value == \"minor_delays\"",
+              "condition": "≤3 delays — minor filing delays",
+              "assignedScore": 3
+            },
+            {
+              "expr": "value == \"five_delays\"",
+              "condition": "5 delays",
+              "assignedScore": 1
+            },
+            {
+              "expr": "value == \"significant_delays\"",
+              "condition": "> 5 delays — significant",
+              "assignedScore": 0
+            }
+          ],
+          "scoringMethod": "range",
+          "inputFieldName": "com_gst_filing_compliance",
+          "maxParameterScore": 5,
+          "parameterDescription": "Filing regularity from gst.gov.in → Return Filing Status. Submit: timely | minor_delays | five_delays | significant_delays",
+          "parameterWeightWithinCategory": 1
+        },
+        {
+          "required": true,
+          "inputType": "category",
+          "dataSource": "human",
+          "conditional": false,
+          "parameterId": "com_filing_frequency",
+          "parameterName": "Filing Frequency — Monthly vs Quarterly",
+          "scoreMappings": [
+            {
+              "expr": "value == \"monthly\"",
+              "condition": "Monthly filer",
+              "assignedScore": 2
+            },
+            {
+              "expr": "value == \"quarterly\"",
+              "condition": "Quarterly — QRMP scheme",
+              "assignedScore": 1
+            }
+          ],
+          "scoringMethod": "range",
+          "inputFieldName": "com_filing_frequency",
+          "maxParameterScore": 2,
+          "parameterDescription": "Return scheme from gst.gov.in. Submit: monthly | quarterly",
+          "parameterWeightWithinCategory": 1
+        },
+        {
+          "required": true,
+          "inputType": "category",
+          "dataSource": "human",
+          "conditional": false,
+          "parameterId": "com_multiple_registrations",
+          "parameterName": "Multiple Registrations on Entity PAN",
+          "scoreMappings": [
+            {
+              "expr": "value == \"no_additional\"",
+              "condition": "No additional registrations",
+              "assignedScore": 2
+            },
+            {
+              "expr": "value == \"active_multi_state\"",
+              "condition": "Active registrations — multi-state operation",
+              "assignedScore": 2
+            },
+            {
+              "expr": "value == \"cancelled_present\"",
+              "condition": "Cancelled registrations present",
+              "assignedScore": 0
+            }
+          ],
+          "scoringMethod": "range",
+          "inputFieldName": "com_multiple_registrations",
+          "maxParameterScore": 2,
+          "parameterDescription": "Search gst.gov.in by PAN. Submit: no_additional | active_multi_state | cancelled_present",
+          "parameterWeightWithinCategory": 1
+        },
+        {
+          "required": true,
+          "inputType": "category",
+          "dataSource": "human",
+          "conditional": false,
+          "parameterId": "com_hsn_match",
+          "parameterName": "HSN Code Match — matches declared product category",
+          "scoreMappings": [
+            {
+              "expr": "value == \"match\"",
+              "condition": "Match — matches declared category",
+              "assignedScore": 2
+            },
+            {
+              "expr": "value == \"not_match\"",
+              "condition": "Not Match — significant mismatch",
+              "assignedScore": 1
+            },
+            {
+              "expr": "value == \"not_available\"",
+              "condition": "Not available",
+              "assignedScore": 0
+            }
+          ],
+          "scoringMethod": "range",
+          "inputFieldName": "com_hsn_match",
+          "maxParameterScore": 2,
+          "parameterDescription": "From gst.gov.in → HSN Summary. Submit: match | not_match | not_available",
+          "parameterWeightWithinCategory": 1
+        },
+        {
+          "required": true,
+          "inputType": "category",
+          "dataSource": "human",
+          "conditional": false,
+          "parameterId": "com_bank_verification",
+          "parameterName": "Bank Account Verification — Penny Drop + GST Match",
+          "scoreMappings": [
+            {
+              "expr": "value == \"penny_success_gst_match\"",
+              "condition": "Penny drop successful + GST match",
+              "assignedScore": 5
+            },
+            {
+              "expr": "value == \"penny_success_gst_unavailable\"",
+              "condition": "Penny drop successful + GST unavailable",
+              "assignedScore": 2
+            },
+            {
+              "expr": "value == \"penny_success_gst_mismatch\"",
+              "condition": "Penny drop successful + GST mismatch",
+              "assignedScore": 1
+            },
+            {
+              "expr": "value == \"penny_unsuccessful\"",
+              "condition": "Penny drop unsuccessful",
+              "assignedScore": -5
+            }
+          ],
+          "scoringMethod": "range",
+          "inputFieldName": "com_bank_verification",
+          "maxParameterScore": 5,
+          "parameterDescription": "Penny drop result vs GST-registered bank account. Submit: penny_success_gst_match | penny_success_gst_unavailable | penny_success_gst_mismatch | penny_unsuccessful",
+          "parameterWeightWithinCategory": 1
+        },
+        {
+          "required": true,
+          "inputType": "number",
+          "dataSource": "human",
+          "conditional": false,
+          "parameterId": "com_gst_delay_days",
+          "parameterName": "GST Filing Delay Days",
+          "scoreMappings": [
+            {
+              "expr": "value <= 10",
+              "condition": "No delay / ≤10 days",
+              "assignedScore": 3
+            },
+            {
+              "expr": "value IN (10, 20]",
+              "condition": "Delay ≤20 days",
+              "assignedScore": 1
+            },
+            {
+              "expr": "value IN (20, 30]",
+              "condition": "Delay > 20 days",
+              "assignedScore": 0
+            },
+            {
+              "expr": "value > 30",
+              "condition": "Delay > 1 month",
+              "assignedScore": -2
+            }
+          ],
+          "scoringMethod": "range",
+          "inputFieldName": "com_gst_delay_days",
+          "maxParameterScore": 3,
+          "parameterDescription": "Maximum filing delay in days across last 12 months from gst.gov.in. Submit as number of days.",
+          "parameterWeightWithinCategory": 1
+        },
+        {
+          "required": false,
+          "inputType": "category",
+          "dataSource": "human",
+          "conditional": true,
+          "parameterId": "com_pf_filing_status",
+          "parameterName": "PF Filing Status — EPFO compliance",
+          "scoreMappings": [
+            {
+              "expr": "value == \"compliant\"",
+              "condition": "Compliant — PF returns filed on time",
+              "assignedScore": 1
+            },
+            {
+              "expr": "value == \"non_compliant\"",
+              "condition": "Non-compliant — defaults or delays",
+              "assignedScore": 0
+            }
+          ],
+          "scoringMethod": "range",
+          "inputFieldName": "com_pf_filing_status",
+          "maxParameterScore": 1,
+          "parameterDescription": "CONDITIONAL — omit (N/A) if entity has no PF-registered employees. Check EPFO portal for filing regularity. Submit: compliant | non_compliant",
+          "parameterWeightWithinCategory": 1
+        }
+      ],
+      "categoryName": "COMPLIANCE",
+      "categoryWeight": 25,
+      "maxCategoryScore": 25,
+      "categoryDescription": "GST compliance, bank account verification and PF status. 9 parameters, 25 pts max (1 conditional buffer — param maxes total 26)."
+    },
+    {
+      "consent": false,
+      "categoryId": "proof_of_address",
+      "parameters": [
+        {
+          "required": true,
+          "inputType": "category",
+          "dataSource": "human",
+          "conditional": false,
+          "parameterId": "addr_ownership_type",
+          "parameterName": "Ownership Type — status of business premises",
+          "scoreMappings": [
+            {
+              "expr": "value == \"owned\"",
+              "condition": "Owned — confirmed via sale deed",
+              "assignedScore": 4
+            },
+            {
+              "expr": "value == \"leased\"",
+              "condition": "Leased — valid lease agreement",
+              "assignedScore": 2.5
+            },
+            {
+              "expr": "value == \"rented\"",
+              "condition": "Rented — rental agreement on record",
+              "assignedScore": 1
+            }
+          ],
+          "scoringMethod": "range",
+          "inputFieldName": "addr_ownership_type",
+          "maxParameterScore": 5,
+          "parameterDescription": "From sale deed / property tax / rental agreement. Submit: owned | leased | rented",
+          "parameterWeightWithinCategory": 1
+        },
+        {
+          "required": true,
+          "inputType": "category",
+          "dataSource": "human",
+          "conditional": false,
+          "parameterId": "addr_electricity_bill",
+          "parameterName": "Electricity Bill Match — address matches GST registered address",
+          "scoreMappings": [
+            {
+              "expr": "value == \"match\"",
+              "condition": "GST address match — confirmed",
+              "assignedScore": 2
+            },
+            {
+              "expr": "value == \"minor_discrepancy\"",
+              "condition": "Minor discrepancy in address details",
+              "assignedScore": 1
+            },
+            {
+              "expr": "value == \"not_match\"",
+              "condition": "Not match — address mismatch",
+              "assignedScore": 0
+            }
+          ],
+          "scoringMethod": "range",
+          "inputFieldName": "addr_electricity_bill",
+          "maxParameterScore": 2,
+          "parameterDescription": "Utility bill vs gst.gov.in registered address. Submit: match | minor_discrepancy | not_match",
+          "parameterWeightWithinCategory": 1
+        },
+        {
+          "required": true,
+          "inputType": "category",
+          "dataSource": "human",
+          "conditional": false,
+          "parameterId": "addr_rental_validation",
+          "parameterName": "Rental Agreement Validation",
+          "scoreMappings": [
+            {
+              "expr": "value == \"owned\"",
+              "condition": "Owned — full score",
+              "assignedScore": 2
+            },
+            {
+              "expr": "value == \"rented_matching\"",
+              "condition": "Rented + matching GST address & electricity",
+              "assignedScore": 2
+            },
+            {
+              "expr": "value == \"minor_discrepancy\"",
+              "condition": "Minor discrepancy",
+              "assignedScore": 1
+            },
+            {
+              "expr": "value == \"not_match\"",
+              "condition": "Not match",
+              "assignedScore": 0
+            }
+          ],
+          "scoringMethod": "range",
+          "inputFieldName": "addr_rental_validation",
+          "maxParameterScore": 2,
+          "parameterDescription": "For owned premises score full. For rented premises, validate agreement vs GST address. Submit: owned | rented_matching | minor_discrepancy | not_match",
+          "parameterWeightWithinCategory": 1
+        },
+        {
+          "required": true,
+          "inputType": "category",
+          "dataSource": "human",
+          "conditional": false,
+          "parameterId": "addr_msme",
+          "parameterName": "MSME Active & Valid — Udyam registration status",
+          "scoreMappings": [
+            {
+              "expr": "value == \"valid_active\"",
+              "condition": "Valid & Active",
+              "assignedScore": 1
+            },
+            {
+              "expr": "value == \"not_valid\"",
+              "condition": "Not Valid / Inactive / Not Registered",
+              "assignedScore": 0
+            }
+          ],
+          "scoringMethod": "range",
+          "inputFieldName": "addr_msme",
+          "maxParameterScore": 1,
+          "parameterDescription": "From udyamregistration.gov.in → Verify URN. Submit: valid_active | not_valid",
+          "parameterWeightWithinCategory": 1
+        },
+        {
+          "required": false,
+          "inputType": "category",
+          "dataSource": "human",
+          "conditional": true,
+          "parameterId": "addr_landlord_declaration",
+          "parameterName": "Landlord Declaration — owner NOC for business use",
+          "scoreMappings": [
+            {
+              "expr": "value == \"present\"",
+              "condition": "Present — signed declaration on record",
+              "assignedScore": 1
+            },
+            {
+              "expr": "value == \"absent\"",
+              "condition": "Absent — declaration not obtained",
+              "assignedScore": 0
+            }
+          ],
+          "scoringMethod": "range",
+          "inputFieldName": "addr_landlord_declaration",
+          "maxParameterScore": 1,
+          "parameterDescription": "CONDITIONAL — omit (N/A) for owned premises. Landlord's signed declaration confirming permission for business use at the registered address. Submit: present | absent",
+          "parameterWeightWithinCategory": 1
+        }
+      ],
+      "categoryName": "PROOF OF ADDRESS",
+      "categoryWeight": 10,
+      "maxCategoryScore": 10,
+      "categoryDescription": "Ownership, utility bill, rental agreement, MSME verification, landlord declaration. 5 parameters, 10 pts max (1 conditional buffer — param maxes total 11)."
+    },
+    {
+      "consent": false,
+      "categoryId": "proof_of_identity",
+      "parameters": [
+        {
+          "required": true,
+          "inputType": "category",
+          "dataSource": "human",
+          "conditional": false,
+          "parameterId": "ident_pan_active",
+          "parameterName": "PAN Active Status — valid and active",
+          "scoreMappings": [
+            {
+              "expr": "value == \"active\"",
+              "condition": "Active",
+              "assignedScore": 1
+            },
+            {
+              "expr": "value == \"inactive\"",
+              "condition": "Not Active / Inoperative",
+              "assignedScore": 0
+            },
+            {
+              "expr": "value == \"not_found\"",
+              "condition": "Not Found / Invalid",
+              "assignedScore": 0
+            }
+          ],
+          "scoringMethod": "range",
+          "inputFieldName": "ident_pan_active",
+          "maxParameterScore": 1,
+          "parameterDescription": "From incometax.gov.in → Verify PAN. Submit: active | inactive | not_found",
+          "parameterWeightWithinCategory": 1
+        },
+        {
+          "required": true,
+          "inputType": "category",
+          "dataSource": "human",
+          "conditional": false,
+          "parameterId": "ident_seller_type",
+          "parameterName": "Seller Type — nature of business / category",
+          "scoreMappings": [
+            {
+              "expr": "value == \"manufacturer\"",
+              "condition": "Manufacturer",
+              "assignedScore": 4
+            },
+            {
+              "expr": "value == \"baler\"",
+              "condition": "Baler",
+              "assignedScore": 3
+            },
+            {
+              "expr": "value == \"processor\"",
+              "condition": "Processor / RVSF",
+              "assignedScore": 3
+            },
+            {
+              "expr": "value == \"importer\"",
+              "condition": "Importer",
+              "assignedScore": 3
+            },
+            {
+              "expr": "value == \"trader\"",
+              "condition": "Trader",
+              "assignedScore": 0
+            }
+          ],
+          "scoringMethod": "range",
+          "inputFieldName": "ident_seller_type",
+          "maxParameterScore": 4,
+          "parameterDescription": "From GST registration / Udyam NIC code. Submit: manufacturer | baler | processor | importer | trader",
+          "parameterWeightWithinCategory": 1
+        },
+        {
+          "required": true,
+          "inputType": "category",
+          "dataSource": "human",
+          "conditional": false,
+          "parameterId": "ident_constitution",
+          "parameterName": "Legal Constitution — entity type",
+          "scoreMappings": [
+            {
+              "expr": "value == \"pvt_public_listed\"",
+              "condition": "Private Limited / Public Limited / Listed",
+              "assignedScore": 3
+            },
+            {
+              "expr": "value == \"llp\"",
+              "condition": "LLP",
+              "assignedScore": 2
+            },
+            {
+              "expr": "value == \"partnership_proprietorship\"",
+              "condition": "Partnership / Proprietorship / HUF",
+              "assignedScore": 1
+            }
+          ],
+          "scoringMethod": "range",
+          "inputFieldName": "ident_constitution",
+          "maxParameterScore": 3,
+          "parameterDescription": "From GST registration / MCA / ROF. Submit: pvt_public_listed | llp | partnership_proprietorship",
+          "parameterWeightWithinCategory": 1
+        },
+        {
+          "required": true,
+          "inputType": "category",
+          "dataSource": "human",
+          "conditional": false,
+          "parameterId": "ident_pan_name_match",
+          "parameterName": "PAN Name Match with Entity — cross-check PAN vs GST legal name",
+          "scoreMappings": [
+            {
+              "expr": "value == \"match\"",
+              "condition": "Match — name matches across both sources",
+              "assignedScore": 2
+            },
+            {
+              "expr": "value == \"not_match\"",
+              "condition": "Not Match — significant discrepancy",
+              "assignedScore": 0
+            }
+          ],
+          "scoringMethod": "range",
+          "inputFieldName": "ident_pan_name_match",
+          "maxParameterScore": 2,
+          "parameterDescription": "Cross-check incometax.gov.in + gst.gov.in. Submit: match | not_match",
+          "parameterWeightWithinCategory": 1
+        }
+      ],
+      "categoryName": "PROOF OF IDENTITY",
+      "categoryWeight": 10,
+      "maxCategoryScore": 10,
+      "categoryDescription": "PAN, seller type, constitution, name match. 4 parameters, 10 pts max."
+    },
+    {
+      "consent": false,
+      "categoryId": "legal_aml",
+      "parameters": [
+        {
+          "required": true,
+          "inputType": "category",
+          "dataSource": "human",
+          "conditional": false,
+          "parameterId": "legal_sanctions",
+          "parameterName": "UN / OFAC / EU / India UAPA-NIA Sanctions",
+          "scoreMappings": [
+            {
+              "expr": "value == \"not_listed\"",
+              "condition": "Not listed — clean",
+              "assignedScore": 1
+            },
+            {
+              "expr": "value == \"listed\"",
+              "condition": "Listed on sanctions",
+              "assignedScore": 0
+            }
+          ],
+          "scoringMethod": "range",
+          "inputFieldName": "legal_sanctions",
+          "maxParameterScore": 1,
+          "parameterDescription": "Check firm and all individuals against all sanction lists. Submit: not_listed | listed",
+          "parameterWeightWithinCategory": 1
+        },
+        {
+          "required": true,
+          "inputType": "category",
+          "dataSource": "human",
+          "conditional": false,
+          "parameterId": "legal_pep",
+          "parameterName": "PEP Screening — proprietor and all partners",
+          "scoreMappings": [
+            {
+              "expr": "value == \"no_pep\"",
+              "condition": "No PEP identified — clean",
+              "assignedScore": 1
+            },
+            {
+              "expr": "value == \"pep_identified\"",
+              "condition": "PEP identified — enhanced due diligence",
+              "assignedScore": 0
+            }
+          ],
+          "scoringMethod": "range",
+          "inputFieldName": "legal_pep",
+          "maxParameterScore": 1,
+          "parameterDescription": "PEP databases / election commission. Submit: no_pep | pep_identified",
+          "parameterWeightWithinCategory": 1
+        },
+        {
+          "required": true,
+          "inputType": "category",
+          "dataSource": "human",
+          "conditional": false,
+          "parameterId": "legal_rbi_wilful_defaulter",
+          "parameterName": "RBI Wilful Defaulter List — firm and all directors",
+          "scoreMappings": [
+            {
+              "expr": "value == \"not_listed\"",
+              "condition": "Not listed",
+              "assignedScore": 1
+            },
+            {
+              "expr": "value == \"listed\"",
+              "condition": "Listed — wilful defaulter",
+              "assignedScore": 0
+            }
+          ],
+          "scoringMethod": "range",
+          "inputFieldName": "legal_rbi_wilful_defaulter",
+          "maxParameterScore": 1,
+          "parameterDescription": "rbi.org.in → Wilful Defaulter List. Submit: not_listed | listed",
+          "parameterWeightWithinCategory": 1
+        },
+        {
+          "required": true,
+          "inputType": "category",
+          "dataSource": "human",
+          "conditional": false,
+          "parameterId": "legal_ecourts",
+          "parameterName": "eCourts — no active criminal proceedings",
+          "scoreMappings": [
+            {
+              "expr": "value == \"no_criminal\"",
+              "condition": "No criminal cases on record",
+              "assignedScore": 1
+            },
+            {
+              "expr": "value == \"active_criminal\"",
+              "condition": "Active criminal proceeding",
+              "assignedScore": 0
+            }
+          ],
+          "scoringMethod": "range",
+          "inputFieldName": "legal_ecourts",
+          "maxParameterScore": 1,
+          "parameterDescription": "ecourts.gov.in → Case Search by party name. Submit: no_criminal | active_criminal",
+          "parameterWeightWithinCategory": 1
+        },
+        {
+          "required": true,
+          "inputType": "category",
+          "dataSource": "human",
+          "conditional": false,
+          "parameterId": "legal_drt_sarfaesi",
+          "parameterName": "DRT / SARFAESI — no debt recovery tribunal cases",
+          "scoreMappings": [
+            {
+              "expr": "value == \"no_drt\"",
+              "condition": "No DRT cases — clean",
+              "assignedScore": 1
+            },
+            {
+              "expr": "value == \"active_drt\"",
+              "condition": "Active DRT or SARFAESI proceeding",
+              "assignedScore": 0
+            }
+          ],
+          "scoringMethod": "range",
+          "inputFieldName": "legal_drt_sarfaesi",
+          "maxParameterScore": 1,
+          "parameterDescription": "drt.gov.in → Case Search. Submit: no_drt | active_drt",
+          "parameterWeightWithinCategory": 1
+        }
+      ],
+      "categoryName": "LEGAL / AML CHECK",
+      "categoryWeight": 5,
+      "maxCategoryScore": 5,
+      "categoryDescription": "Sanctions, PEP, RBI wilful defaulter, eCourts, DRT checks. 5 parameters, 5 pts max."
+    },
+    {
+      "consent": true,
+      "categoryId": "onsite_verification",
+      "parameters": [
+        {
+          "required": true,
+          "inputType": "category",
+          "dataSource": "human",
+          "conditional": false,
+          "parameterId": "onsite_name_board",
+          "parameterName": "Name Board — business name board at premises",
+          "scoreMappings": [
+            {
+              "expr": "value == \"outside\"",
+              "condition": "Outside premises — clearly visible, matches GST name",
+              "assignedScore": 5
+            },
+            {
+              "expr": "value == \"inside\"",
+              "condition": "Inside premises — visible but not exterior-facing",
+              "assignedScore": 3
+            },
+            {
+              "expr": "value == \"temporary\"",
+              "condition": "Temporary — banner or temporary signage",
+              "assignedScore": 1
+            },
+            {
+              "expr": "value == \"not_found\"",
+              "condition": "Not found — name board absent",
+              "assignedScore": 0
+            }
+          ],
+          "scoringMethod": "range",
+          "inputFieldName": "onsite_name_board",
+          "maxParameterScore": 5,
+          "parameterDescription": "Physical site visit — photograph. Submit: outside | inside | temporary | not_found",
+          "parameterWeightWithinCategory": 1
+        },
+        {
+          "required": true,
+          "inputType": "category",
+          "dataSource": "human",
+          "conditional": false,
+          "parameterId": "onsite_geo_tag",
+          "parameterName": "Geo Tag Match with GST Address",
+          "scoreMappings": [
+            {
+              "expr": "value == \"match\"",
+              "condition": "Match — GPS matches declared locality",
+              "assignedScore": 5
+            },
+            {
+              "expr": "value == \"minor_discrepancy\"",
+              "condition": "Minor discrepancy — within acceptable range",
+              "assignedScore": 3
+            },
+            {
+              "expr": "value == \"not_match\"",
+              "condition": "Not match — location significantly differs",
+              "assignedScore": 0
+            }
+          ],
+          "scoringMethod": "range",
+          "inputFieldName": "onsite_geo_tag",
+          "maxParameterScore": 5,
+          "parameterDescription": "GPS verification via site visit. Submit: match | minor_discrepancy | not_match",
+          "parameterWeightWithinCategory": 1
+        },
+        {
+          "required": true,
+          "inputType": "category",
+          "dataSource": "human",
+          "conditional": false,
+          "parameterId": "onsite_operational_activity",
+          "parameterName": "Operational Activity Visibility",
+          "scoreMappings": [
+            {
+              "expr": "value == \"visible\"",
+              "condition": "Visible — business activity clearly observable",
+              "assignedScore": 3
+            },
+            {
+              "expr": "value == \"partial\"",
+              "condition": "Partial — limited operations observed",
+              "assignedScore": 1
+            },
+            {
+              "expr": "value == \"no_activity\"",
+              "condition": "No activity — premises locked or vacant",
+              "assignedScore": 0
+            }
+          ],
+          "scoringMethod": "range",
+          "inputFieldName": "onsite_operational_activity",
+          "maxParameterScore": 3,
+          "parameterDescription": "Business activity observation at site visit. Submit: visible | partial | no_activity",
+          "parameterWeightWithinCategory": 1
+        },
+        {
+          "required": false,
+          "inputType": "category",
+          "dataSource": "human",
+          "conditional": true,
+          "parameterId": "onsite_machinery",
+          "parameterName": "Machinery Verification — machinery present and operational",
+          "scoreMappings": [
+            {
+              "expr": "value == \"present_running\"",
+              "condition": "Present & running — operational",
+              "assignedScore": 3
+            },
+            {
+              "expr": "value == \"present_not_running\"",
+              "condition": "Present but not running — idle",
+              "assignedScore": 2.5
+            },
+            {
+              "expr": "value == \"not_present\"",
+              "condition": "Not present",
+              "assignedScore": 1
+            }
+          ],
+          "scoringMethod": "range",
+          "inputFieldName": "onsite_machinery",
+          "maxParameterScore": 3,
+          "parameterDescription": "CONDITIONAL — omit (N/A) for trading / services entities. Physical inspection. Submit: present_running | present_not_running | not_present",
+          "parameterWeightWithinCategory": 1
+        },
+        {
+          "required": true,
+          "inputType": "category",
+          "dataSource": "human",
+          "conditional": false,
+          "parameterId": "onsite_area_type",
+          "parameterName": "Surrounding Area Type — nature of the locality",
+          "scoreMappings": [
+            {
+              "expr": "value == \"commercial_industrial\"",
+              "condition": "Commercial / Industrial — consistent with business",
+              "assignedScore": 2
+            },
+            {
+              "expr": "value == \"residential\"",
+              "condition": "Residential — mixed or residential locality",
+              "assignedScore": 1
+            }
+          ],
+          "scoringMethod": "range",
+          "inputFieldName": "onsite_area_type",
+          "maxParameterScore": 2,
+          "parameterDescription": "Observation of surrounding area at site visit. Submit: commercial_industrial | residential",
+          "parameterWeightWithinCategory": 1
+        },
+        {
+          "required": true,
+          "inputType": "category",
+          "dataSource": "human",
+          "conditional": false,
+          "parameterId": "onsite_neighbor_check",
+          "parameterName": "Third-Party / Neighbor Check",
+          "scoreMappings": [
+            {
+              "expr": "value == \"confirms\"",
+              "condition": "Neighbor confirms — business presence confirmed",
+              "assignedScore": 2
+            },
+            {
+              "expr": "value == \"does_not_confirm\"",
+              "condition": "Does not confirm — unable to verify",
+              "assignedScore": 0
+            }
+          ],
+          "scoringMethod": "range",
+          "inputFieldName": "onsite_neighbor_check",
+          "maxParameterScore": 2,
+          "parameterDescription": "Neighbor confirms business presence at site visit. Submit: confirms | does_not_confirm",
+          "parameterWeightWithinCategory": 1
+        }
+      ],
+      "categoryName": "ON-SITE VERIFICATION",
+      "categoryWeight": 20,
+      "maxCategoryScore": 20,
+      "categoryDescription": "Physical site visit — name board, geo-tag, operations, machinery, area, neighbor. 6 parameters, 20 pts max."
+    },
+    {
+      "consent": true,
+      "categoryId": "gst_3b_analysis",
+      "parameters": [
+        {
+          "required": true,
+          "inputType": "number",
+          "dataSource": "human",
+          "conditional": false,
+          "parameterId": "gst3b_itc_utilisation",
+          "parameterName": "ITC Utilisation — ratio of ITC claimed vs total GST output liability",
+          "scoreMappings": [
+            {
+              "expr": "value < 50",
+              "condition": "< 50% ITC utilisation — mostly cash, strong liquidity",
+              "assignedScore": 12
+            },
+            {
+              "expr": "value IN [50, 80)",
+              "condition": "50–80% — moderate ITC utilisation",
+              "assignedScore": 10
+            },
+            {
+              "expr": "value IN [80, 90)",
+              "condition": "80–90% — high ITC utilisation",
+              "assignedScore": 7
+            },
+            {
+              "expr": "value >= 90",
+              "condition": "90–100% — almost entirely via credit",
+              "assignedScore": 5
+            }
+          ],
+          "scoringMethod": "range",
+          "inputFieldName": "gst3b_itc_utilisation",
+          "maxParameterScore": 12,
+          "parameterDescription": "GSTR-3B (consent) → ITC claimed (Table 4) / total output tax liability (Table 3.1) × 100. Submit as percentage (0-100).",
+          "parameterWeightWithinCategory": 1
+        },
+        {
+          "required": true,
+          "inputType": "number",
+          "dataSource": "human",
+          "conditional": false,
+          "parameterId": "gst3b_turnover",
+          "parameterName": "Turnover — declared GST turnover from 3B (last 12 months annualised)",
+          "scoreMappings": [
+            {
+              "expr": "value < 10",
+              "condition": "₹0 – ₹10 Lakhs",
+              "assignedScore": 0
+            },
+            {
+              "expr": "value IN [10, 200]",
+              "condition": "> ₹10 Lakhs – ₹2 Crores",
+              "assignedScore": 3
+            },
+            {
+              "expr": "value > 200",
+              "condition": "> ₹2 Crores",
+              "assignedScore": 6
+            }
+          ],
+          "scoringMethod": "range",
+          "inputFieldName": "gst3b_turnover",
+          "maxParameterScore": 6,
+          "parameterDescription": "GSTR-3B (consent) → Outward supply turnover (Table 3.1). Submit in Lakhs (e.g. 150 for ₹1.5 Cr).",
+          "parameterWeightWithinCategory": 1
+        }
+      ],
+      "categoryName": "3B ANALYSIS",
+      "categoryWeight": 18,
+      "maxCategoryScore": 18,
+      "categoryDescription": "GSTR-3B consent data — ITC utilisation and declared turnover. 2 parameters, 18 pts max."
+    },
+    {
+      "consent": true,
+      "categoryId": "gst_2b_analysis",
+      "parameters": [
+        {
+          "required": true,
+          "inputType": "category",
+          "dataSource": "human",
+          "conditional": false,
+          "parameterId": "gst2b_itc_reconciliation",
+          "parameterName": "ITC Auto-Populated vs Claimed — GSTR-2B eligible ITC vs GSTR-3B claimed",
+          "scoreMappings": [
+            {
+              "expr": "value == \"no_excess\"",
+              "condition": "No excess & same — fully reconciled",
+              "assignedScore": 3
+            },
+            {
+              "expr": "value == \"minor_excess\"",
+              "condition": "Minor excess claimed — reconcilable",
+              "assignedScore": 1
+            },
+            {
+              "expr": "value == \"significant_excess\"",
+              "condition": "Significant excess claimed — reversal required",
+              "assignedScore": 0
+            }
+          ],
+          "scoringMethod": "range",
+          "inputFieldName": "gst2b_itc_reconciliation",
+          "maxParameterScore": 3,
+          "parameterDescription": "GSTR-2B (consent) → auto-populated ITC vs GSTR-3B Table 4. Submit: no_excess | minor_excess | significant_excess",
+          "parameterWeightWithinCategory": 1
+        },
+        {
+          "required": true,
+          "inputType": "number",
+          "dataSource": "human",
+          "conditional": false,
+          "parameterId": "gst2b_top10_sellers_active",
+          "parameterName": "Top 10 Sellers Contribution — % of top sellers that are GST-active",
+          "scoreMappings": [
+            {
+              "expr": "value == 100",
+              "condition": "100% active — all top sellers GST-active",
+              "assignedScore": 7
+            },
+            {
+              "expr": "value IN [80, 100)",
+              "condition": "80–99% active — most sellers active",
+              "assignedScore": 4
+            },
+            {
+              "expr": "value < 80",
+              "condition": "< 80% active — significant portion inactive",
+              "assignedScore": 0
+            }
+          ],
+          "scoringMethod": "range",
+          "inputFieldName": "gst2b_top10_sellers_active",
+          "maxParameterScore": 7,
+          "parameterDescription": "GSTR-2B (consent) → Supplier-wise ITC — top 10 sellers by purchase value. Submit as percentage active (0-100).",
+          "parameterWeightWithinCategory": 1
+        }
+      ],
+      "categoryName": "2B ANALYSIS",
+      "categoryWeight": 10,
+      "maxCategoryScore": 10,
+      "categoryDescription": "GSTR-2B consent data — ITC reconciliation and seller quality. 2 parameters, 10 pts max."
+    },
+    {
+      "consent": true,
+      "categoryId": "itr_analysis",
+      "parameters": [
+        {
+          "required": true,
+          "inputType": "number",
+          "dataSource": "human",
+          "conditional": false,
+          "parameterId": "itr_availability",
+          "parameterName": "Availability of 3 Years ITR",
+          "scoreMappings": [
+            {
+              "expr": "value >= 3",
+              "condition": "3 years ITR filed",
+              "assignedScore": 1
+            },
+            {
+              "expr": "value == 2",
+              "condition": "2 years ITR available",
+              "assignedScore": 0.5
+            },
+            {
+              "expr": "value <= 1",
+              "condition": "1 year or no ITR filed",
+              "assignedScore": 0
+            }
+          ],
+          "scoringMethod": "range",
+          "inputFieldName": "itr_availability",
+          "maxParameterScore": 1,
+          "parameterDescription": "IT Portal (consent) → ITR filing history. Submit number of years filed: 3 | 2 | 1 | 0",
+          "parameterWeightWithinCategory": 1
+        },
+        {
+          "required": true,
+          "inputType": "category",
+          "dataSource": "human",
+          "conditional": false,
+          "parameterId": "itr_sales_trend",
+          "parameterName": "Sales Trend — year-on-year revenue growth across 3 years",
+          "scoreMappings": [
+            {
+              "expr": "value == \"growing_all_3\"",
+              "condition": "Growing consistently across all 3 years",
+              "assignedScore": 1
+            },
+            {
+              "expr": "value == \"growing_2_of_3\"",
+              "condition": "Growing in 2 of 3 years",
+              "assignedScore": 0.5
+            },
+            {
+              "expr": "value == \"flat_declining\"",
+              "condition": "Flat or declining across 2+ years",
+              "assignedScore": 0
+            }
+          ],
+          "scoringMethod": "range",
+          "inputFieldName": "itr_sales_trend",
+          "maxParameterScore": 1,
+          "parameterDescription": "ITR P&L (consent) → Gross sales across 3 AYs. Submit: growing_all_3 | growing_2_of_3 | flat_declining",
+          "parameterWeightWithinCategory": 1
+        }
+      ],
+      "categoryName": "ITR ANALYSIS",
+      "categoryWeight": 2,
+      "maxCategoryScore": 2,
+      "categoryDescription": "ITR consent data — availability and sales trend. 2 parameters, 2 pts max."
+    }
+  ],
+  "scoreRange": {
+    "max": 100,
+    "min": 0
+  },
+  "weightTotal": 100,
+  "consentSplit": {
+    "consent": {
+      "weight": 50,
+      "categories": [
+        "onsite_verification",
+        "gst_3b_analysis",
+        "gst_2b_analysis",
+        "itr_analysis"
+      ]
+    },
+    "noConsent": {
+      "weight": 50,
+      "categories": [
+        "compliance",
+        "proof_of_address",
+        "proof_of_identity",
+        "legal_aml"
+      ]
+    }
+  },
+  "modelVersion": "8.0.0",
+  "overallDescription": "8-category scoring model totalling 100 points. All parameters are human-entered. 50% No-Consent (Compliance 25, POA 10, POI 10, Legal 5) + 50% Consent-Based (On-Site 20, 3B 18, 2B 10, ITR 2). Score = sum of earned points; the grade band is looked up purely from the total (no hard-reject override -- confirmed against the live platform's own parameter view, 2026-09-03).",
+  "scoringAggregationMethod": "sum"
+}
