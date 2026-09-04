@@ -31,11 +31,6 @@ from vdd.score.engine import ScoringEngine
 from vdd.report.build_context import build_context
 from vdd.report.render import generate_report
 
-# Merge priority per PROMPT.md step 5 -- first doc type wins for a field
-# when more than one document mentions it.
-_MERGE_PRIORITY = ["gst_certificate", "msme_certificate", "kyc_form", "pan_entity", "pan_owner",
-                    "cancelled_cheque", "gst_portal"]
-
 _FIELD_MERGE_MAP = {
     "gstin": ["gst_certificate", "kyc_form"],
     "legal_name": ["gst_certificate", "kyc_form"],

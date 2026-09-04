@@ -116,7 +116,17 @@ class ScoringEngine:
                                           unresolved=True, note=note))
                 continue
 
-            matched = next((sm for sm in p["scoreMappings"] if eval_expr(sm["expr"], r.value)), None)
+            try:
+                matched = next((sm for sm in p["scoreMappings"] if eval_expr(sm["expr"], r.value)), None)
+            except ExprError as e:
+                # A malformed `expr` in scoring_model.json must not crash the
+                # whole run for every vendor -- fail this one parameter closed
+                # (scored 0 / unresolved, same as "no matching bucket") and
+                # surface the bad expr in the note so it gets caught and fixed.
+                max_score = 0.0 if is_conditional else p["maxParameterScore"]
+                params.append(ParamScore(pid, p["parameterName"], r.value, None, 0.0, max_score,
+                                          unresolved=True, note=f"gap: {e}"))
+                continue
             if matched is None:
                 max_score = 0.0 if is_conditional else p["maxParameterScore"]
                 params.append(ParamScore(pid, p["parameterName"], r.value, None, 0.0, max_score,
