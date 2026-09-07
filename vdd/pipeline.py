@@ -30,6 +30,7 @@ from vdd.resolve.resolvers import resolve_all, ApiBundle
 from vdd.score.engine import ScoringEngine
 from vdd.report.build_context import build_context
 from vdd.report.render import generate_report
+from vdd.report.render import build as render_build
 
 _FIELD_MERGE_MAP = {
     "gstin": ["gst_certificate", "kyc_form"],
@@ -76,6 +77,38 @@ class VendorRunResult:
     extraction_warnings: List[str] = field(default_factory=list)
     api_errors: List[str] = field(default_factory=list)
     cross_check_items: List[str] = field(default_factory=list)
+    # LLM review loop (vdd/review/) -- reviewed=False/approved=False and an
+    # empty corrections/escalations list means the deterministic-only report
+    # was produced, either because review was disabled/no key was
+    # configured, or because the review graph errored out (see review_error)
+    # and this pipeline fell back rather than aborting the run.
+    reviewed: bool = False
+    approved: bool = False
+    review_iterations: int = 0
+    corrections_applied: List[dict] = field(default_factory=list)
+    escalations_for_human: List[dict] = field(default_factory=list)
+    review_error: Optional[str] = None
+    review_trace_path: Optional[str] = None
+
+
+@dataclass
+class VendorComputation:
+    """Output of the deterministic compute phase (extract -> API -> resolve ->
+    score -> build_context), before any rendering. Split out from run_vendor
+    so the LLM review graph (vdd/review/) can sit between this and the final
+    render -- it reads/patches `resolved`/`entity` and re-derives `context`
+    itself, it never touches this dataclass again after the first read."""
+    vendor_name: str
+    docs: ClassifiedDocs
+    entity: dict
+    api_bundle: ApiBundle
+    resolved: dict
+    context: dict
+    unresolved_fields: List[str]
+    missing_documents: List[str]
+    cross_check_items: List[str]
+    api_errors: List[str]
+    warnings: List[str]
 
 
 # Judgment-call / documentation-gap markers already used deliberately throughout
@@ -289,6 +322,16 @@ def fetch_api_data(client: Optional[FinoscaleClient], entity: dict, vendor_name:
             api_errors.append(f"{label}: {e}")
         return None
 
+    # Independent of PAN/GSTIN -- runs whenever a bank account number + IFSC
+    # were extracted from any document (cancelled cheque / GST portal). A
+    # failed call (network/auth/etc, caught by `_try`) leaves this None, which
+    # resolve_com_bank_verification treats as "fall back to GST-portal
+    # inference", never as a scored negative.
+    account_number, ifsc = entity.get("account_number"), entity.get("ifsc")
+    if account_number and ifsc:
+        bundle.bank_verification = _try("ongrid.bank-verification.verify",
+                                         lambda: client.ongrid_bank_verification_verify(account_number, ifsc))
+
     if gstin:
         bundle.ongrid_detailed = _try("ongrid.fetch-detailed",
                                        lambda: client.ongrid_gstin_fetch_detailed(gstin))
@@ -334,9 +377,12 @@ def fetch_api_data(client: Optional[FinoscaleClient], entity: dict, vendor_name:
     return bundle
 
 
-def run_vendor(docs_path: str, out_dir: str, client: Optional[FinoscaleClient] = None,
-               scoring_model_path: str = "config/scoring_model.json",
-               ocr_cache_dir: str = "cache") -> VendorRunResult:
+def compute_vendor_data(docs_path: str, client: Optional[FinoscaleClient] = None,
+                         scoring_model_path: str = "config/scoring_model.json",
+                         ocr_cache_dir: str = "cache") -> VendorComputation:
+    """Everything up to and including build_context() -- no rendering. Split
+    out of run_vendor so the LLM review graph can be invoked in between this
+    and the final HTML/PDF write."""
     vendor_name = os.path.basename(os.path.normpath(docs_path))
     docs = classify_folder(docs_path)
 
@@ -357,6 +403,88 @@ def run_vendor(docs_path: str, out_dir: str, client: Optional[FinoscaleClient] =
     result = engine.score_no_consent(resolved)
     context = build_context(entity, result)
 
+    if docs.unmatched:
+        warnings.append(f"{len(docs.unmatched)} file(s) in the folder didn't match any known document type: "
+                         + ", ".join(os.path.basename(f) for f in docs.unmatched))
+
+    return VendorComputation(
+        vendor_name=vendor_name, docs=docs, entity=entity, api_bundle=api_bundle, resolved=resolved,
+        context=context, unresolved_fields=unresolved_fields, missing_documents=missing,
+        cross_check_items=cross_check_items, api_errors=api_errors, warnings=warnings,
+    )
+
+
+def _run_review(computed: VendorComputation, client: Optional[FinoscaleClient],
+                 scoring_model_path: str, out_dir: str, max_review_iterations: Optional[int],
+                 warnings: List[str]) -> dict:
+    """Runs the LLM review graph and returns a dict of VendorRunResult fields
+    to merge in. Never raises -- any failure (missing key, Gemini/OpenAI
+    outage, a tool crashing, a malformed structured response, ...) is caught
+    here and degrades to the deterministic-only report, exactly like every
+    other external call in this pipeline (fetch_api_data's per-call
+    try/except, the AML screeners' fail-closed behavior, etc). The run must
+    never abort over a review failure."""
+    try:
+        from vdd.review.model import select_provider
+        provider = select_provider()
+    except Exception as e:
+        # Covers langchain/langgraph not being installed yet (ImportError) as
+        # well as a bad LLM_PROVIDER value -- either way, degrade rather than
+        # crash every run just because the review layer isn't set up.
+        warnings.append(f"LLM review skipped -- could not determine an LLM provider ({e}).")
+        return {"context": computed.context}
+
+    if provider is None:
+        warnings.append("LLM review skipped -- no GEMINI_API_KEY/OPENAI_API_KEY configured.")
+        return {"context": computed.context}
+
+    try:
+        from vdd.review.graph import DEFAULT_MAX_ITERATIONS, build_review_graph
+        from vdd.review.trace import write_review_trace
+
+        graph = build_review_graph()
+        init_state = {
+            "vendor_name": computed.vendor_name,
+            "scoring_model_path": scoring_model_path,
+            "client": client,
+            "entity": computed.entity,
+            "resolved": computed.resolved,
+            "context": computed.context,
+            "html": render_build(computed.context),
+            "cross_check_items": computed.cross_check_items,
+            "iteration": 1,
+            "max_iterations": max_review_iterations or DEFAULT_MAX_ITERATIONS,
+            "passes": [], "findings": [], "corrections_applied": [], "escalations": [], "message_traces": [],
+        }
+        final_state = graph.invoke(init_state)
+        review_trace_path = write_review_trace(computed.vendor_name, out_dir, final_state)
+        return {
+            "context": final_state["context"],
+            "reviewed": True,
+            "approved": final_state.get("approved", False),
+            "review_iterations": max(0, final_state.get("iteration", 1) - 1),
+            "corrections_applied": final_state.get("corrections_applied", []),
+            "escalations_for_human": final_state.get("escalations", []),
+            "review_trace_path": review_trace_path,
+        }
+    except Exception as e:
+        warnings.append(f"LLM review failed, falling back to the deterministic report: {e}")
+        return {"context": computed.context, "review_error": str(e)}
+
+
+def run_vendor(docs_path: str, out_dir: str, client: Optional[FinoscaleClient] = None,
+               scoring_model_path: str = "config/scoring_model.json",
+               ocr_cache_dir: str = "cache", review: bool = True,
+               max_review_iterations: Optional[int] = None) -> VendorRunResult:
+    computed = compute_vendor_data(docs_path, client, scoring_model_path, ocr_cache_dir)
+    warnings = list(computed.warnings)
+
+    review_fields: dict = {"context": computed.context}
+    if review:
+        review_fields = _run_review(computed, client, scoring_model_path, out_dir,
+                                     max_review_iterations, warnings)
+    context = review_fields["context"]
+
     html_path, pdf_path = None, None
     try:
         html_path, pdf_path = generate_report(context, out_dir)
@@ -370,12 +498,13 @@ def run_vendor(docs_path: str, out_dir: str, client: Optional[FinoscaleClient] =
         except Exception as e2:
             warnings.append(f"Report generation failed entirely: {e2}")
 
-    if docs.unmatched:
-        warnings.append(f"{len(docs.unmatched)} file(s) in the folder didn't match any known document type: "
-                         + ", ".join(os.path.basename(f) for f in docs.unmatched))
-
     return VendorRunResult(
-        vendor_name=vendor_name, html_path=html_path, pdf_path=pdf_path, score=context["score"],
-        unresolved_fields=unresolved_fields, missing_documents=missing,
-        extraction_warnings=warnings, api_errors=api_errors, cross_check_items=cross_check_items,
+        vendor_name=computed.vendor_name, html_path=html_path, pdf_path=pdf_path, score=context["score"],
+        unresolved_fields=computed.unresolved_fields, missing_documents=computed.missing_documents,
+        extraction_warnings=warnings, api_errors=computed.api_errors, cross_check_items=computed.cross_check_items,
+        reviewed=review_fields.get("reviewed", False), approved=review_fields.get("approved", False),
+        review_iterations=review_fields.get("review_iterations", 0),
+        corrections_applied=review_fields.get("corrections_applied", []),
+        escalations_for_human=review_fields.get("escalations_for_human", []),
+        review_error=review_fields.get("review_error"), review_trace_path=review_fields.get("review_trace_path"),
     )

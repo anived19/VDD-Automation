@@ -49,6 +49,7 @@ class ApiBundle:
     probe42_pnp: Optional[dict] = None           # probe42_fetch_pnp(pan) -- confirmed working
     zigram: Optional[dict] = None                # zigram_screening(entity) -- see resolve_aml docstring: composite verdict is unexplained/unverified, not wired into any resolver
     zigram_partners: Optional[list] = None        # [{"name": str, "result": dict|None}, ...] -- one Individual screen per partner, same caveat
+    bank_verification: Optional[dict] = None      # ongrid_bank_verification_verify(account_number, ifsc) -- live penny drop
 
 
 def _dig(d: Any, path: str) -> Any:
@@ -861,20 +862,18 @@ def resolve_aml(api: ApiBundle, entity_name: str = None, partner_names: List[str
     }
 
 
-def resolve_com_bank_verification(entity: dict) -> Resolved:
+def resolve_com_bank_verification(entity: dict, api: Optional["ApiBundle"] = None) -> Resolved:
     """Bank Account Verification -- Penny Drop + GST Match (COM-07, 5 pts).
 
-    Every bucket in ScoringModel.json asserts an outcome of an *actual* penny
-    drop ("penny drop successful / unsuccessful"), and the Finoscale Data API
-    exposes no bank-account-verification endpoint (Ongrid GSTIN/MSME, Digitap
-    PAN+GST, Probe42 and Zigram are the whole surface -- checked against
-    vendors-data-api-reference.md), so this pipeline cannot run one.
-
-    There is exactly one document-derived signal that is genuinely equivalent:
-    the GST portal's own Bank Account Status. GSTN validates a taxpayer's bank
-    account through the NPCI/PFMS account-validation rail against the
-    registered taxpayer's name -- i.e. a penny-drop-equivalent *with* a GST
-    name match. So:
+    A real penny-drop endpoint (`ongrid_bank_verification_verify`) is now
+    wired into `fetch_api_data` and is the primary signal (see `api.bank_verification`
+    below) -- it's called whenever an account number + IFSC were extracted,
+    independent of GSTIN/PAN. When it's unavailable (no account/IFSC could be
+    extracted, or the live call itself failed/errored -- see api_errors), this
+    falls back to the GST portal's own Bank Account Status, the next-best
+    penny-drop-equivalent signal: GSTN validates a taxpayer's bank account
+    through the NPCI/PFMS account-validation rail against the registered
+    taxpayer's name.
 
       * portal status = Validated, and the account agrees with the cancelled
         cheque -> `penny_success_gst_match` (a real, sourced positive).
@@ -928,6 +927,37 @@ def resolve_com_bank_verification(entity: dict) -> Resolved:
     elif mark is False:
         ev.append("WARNING: the 'cancelled cheque' document shows no visible cancellation mark -- it may be "
                   "a blank/unused leaf and is not valid proof (Custom Instructions rule 2)")
+
+    bank_api = getattr(api, "bank_verification", None) if api else None
+    if bank_api:
+        data = bank_api.get("bank_account_data") if isinstance(bank_api, dict) else None
+        holder_name = (data or {}).get("name") if isinstance(data, dict) else None
+        if holder_name:
+            legal_name = entity.get("legal_name") or entity.get("trade_name")
+            match = _name_match(holder_name, legal_name or "")
+            resp_bank = (data or {}).get("bank_name")
+            ev.append(f"Live penny drop via Ongrid bank-verification succeeded -- account holder name "
+                      f"returned: '{holder_name}'" + (f" at {resp_bank}" if resp_bank else ""))
+            if match is True:
+                return Resolved.ok(
+                    "penny_success_gst_match", "api:ongrid.bank-verification.verify (live penny drop)",
+                    note="; ".join(ev) + f"; matches the GST-registered legal name '{legal_name}'.")
+            if match is False:
+                ev.append(f"CRITICAL: the returned account-holder name does not match the GST-registered "
+                          f"legal name '{legal_name}'")
+                return Resolved.ok("penny_success_gst_mismatch",
+                                    "api:ongrid.bank-verification.verify (live penny drop)", note="; ".join(ev))
+            ev.append("no GST-registered legal name on file to compare the penny-drop account-holder name against")
+            return Resolved.ok("penny_success_gst_unavailable",
+                                "api:ongrid.bank-verification.verify (live penny drop)", note="; ".join(ev))
+        # `bank_account_data` missing/empty on a call that completed without
+        # raising is a genuine negative penny-drop result, not an infra
+        # failure (those are caught in fetch_api_data and leave this None).
+        msg = bank_api.get("message") if isinstance(bank_api, dict) else None
+        ev.append("Live penny drop via Ongrid bank-verification returned no account-holder data"
+                  + (f" ({msg})" if msg else "") + " -- treated as an unsuccessful penny drop")
+        return Resolved.ok("penny_unsuccessful", "api:ongrid.bank-verification.verify (live penny drop)",
+                            note="; ".join(ev))
 
     verified = entity.get("gst_portal_bank_verified")
     portal_status = entity.get("gst_portal_account_status")
@@ -998,7 +1028,7 @@ def resolve_all(entity: dict, docs, api: ApiBundle) -> dict:
         "com_filing_frequency": resolve_com_filing_frequency(api),
         "com_multiple_registrations": resolve_com_multiple_registrations(api, entity.get("gstin")),
         "com_hsn_match": resolve_com_hsn_match(api, entity),
-        "com_bank_verification": resolve_com_bank_verification(entity),
+        "com_bank_verification": resolve_com_bank_verification(entity, api),
         "com_gst_delay_days": resolve_com_gst_delay_days(api),
         "com_pf_filing_status": resolve_com_pf_filing_status(api),
         "addr_ownership_type": ownership_resolved,

@@ -122,6 +122,53 @@ def test_bank_flags_uncancelled_cheque():
     assert "WARNING" in r.note and "cancellation mark" in r.note
 
 
+# ---------------------------------------------------------------- bank verification: live penny drop
+def test_bank_live_penny_drop_match_takes_priority_over_gst_portal():
+    """A live penny-drop result is the primary signal -- even a GST-portal
+    'NotValidated' flag (which alone would leave this unresolved, see
+    test_bank_unresolved_not_negative_when_portal_says_notvalidated) must not
+    override a successful, name-matching live penny drop."""
+    e = dict(_BASE_BANK, legal_name="Dinesh Polymers",
+             gst_portal_bank_verified=False, gst_portal_account_status="NotValidated")
+    api = ApiBundle(bank_verification={"code": "0", "message": "Success",
+                                        "bank_account_data": {"name": "DINESH POLYMERS", "bank_name": "Central Bank of India"}})
+    r = resolve_com_bank_verification(e, api)
+    assert r.value == "penny_success_gst_match" and not r.unresolved
+    assert "api:ongrid.bank-verification.verify" in r.source
+
+
+def test_bank_live_penny_drop_name_mismatch():
+    e = dict(_BASE_BANK, legal_name="Dinesh Polymers")
+    api = ApiBundle(bank_verification={"bank_account_data": {"name": "SOME OTHER ENTITY ENTIRELY"}})
+    r = resolve_com_bank_verification(e, api)
+    assert r.value == "penny_success_gst_mismatch" and not r.unresolved
+    assert "CRITICAL" in r.note
+
+
+def test_bank_live_penny_drop_gst_unavailable_when_no_legal_name():
+    e = dict(_BASE_BANK)  # no legal_name on file to compare against
+    api = ApiBundle(bank_verification={"bank_account_data": {"name": "DINESH POLYMERS"}})
+    r = resolve_com_bank_verification(e, api)
+    assert r.value == "penny_success_gst_unavailable" and not r.unresolved
+
+
+def test_bank_live_penny_drop_unsuccessful_when_no_account_data():
+    e = dict(_BASE_BANK, legal_name="Dinesh Polymers")
+    api = ApiBundle(bank_verification={"code": "1001", "message": "Invalid Account"})
+    r = resolve_com_bank_verification(e, api)
+    assert r.value == "penny_unsuccessful" and not r.unresolved
+
+
+def test_bank_falls_back_to_gst_portal_when_no_live_result():
+    """api.bank_verification is None (e.g. no account/IFSC extracted, or the
+    live call errored) -- behaves exactly like the pre-live-API resolver."""
+    e = dict(_BASE_BANK, gst_portal_bank_verified=True, gst_portal_account_status="Validated",
+             gst_portal_account_number="1351141739")
+    r = resolve_com_bank_verification(e, ApiBundle())
+    assert r.value == "penny_success_gst_match" and not r.unresolved
+    assert "api:ongrid.bank-verification.verify" not in r.source
+
+
 # ---------------------------------------------------------------- electricity bill / address
 _GST_ADDR = "G100, MIDC, JALGAON, Jalgaon, Maharashtra, 425003"
 

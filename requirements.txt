@@ -7,7 +7,26 @@ weasyprint>=69.0
 pdfplumber>=0.11
 pytest>=8.0
 
-# Optional OCR/vision fallbacks for extract/ocr.py -- code degrades gracefully
-# (marks the field unresolved) if these aren't installed / configured.
+# Optional OCR fallback for extract/ocr.py -- code degrades gracefully
+# (marks the field unresolved) if this isn't installed. No document
+# image/bytes are ever sent to any LLM -- there is deliberately no vision
+# fallback tier here (see extract/ocr.py's module docstring).
 pytesseract>=0.3      # also needs the Tesseract binary on PATH
-anthropic>=0.40        # also needs ANTHROPIC_API_KEY env var
+
+# LLM review loop (vdd/review/) -- reads the deterministic report, decides
+# what to independently re-check, corrects/escalates findings. Gemini is
+# the only tested provider today (GEMINI_API_KEY); langchain-openai is
+# installed so the provider-swap path (see vdd/review/model.py) exists and
+# imports cleanly, but is UNTESTED (no OpenAI key available while building
+# this). NOTE: `langsmith` will appear in `pip freeze` as a required
+# transitive dependency of langchain-core itself (confirmed -- it is not
+# listed here and cannot be excluded while using langchain/langgraph at
+# all) -- it is never invoked, since tracing stays off via env vars,
+# enforced at import time (see vdd/review/__init__.py's guard). Its mere
+# presence on disk makes no network call by itself.
+langgraph>=1.0.4
+langchain>=1.1.2
+langchain-core>=1.1.2
+langchain-google-genai>=4.0.0
+langchain-openai>=1.0.0
+tavily-python>=0.5.0

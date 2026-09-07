@@ -191,6 +191,17 @@ class FinoscaleClient:
                              json_body={"panNumber": pan_number, "consent": "Y",
                                         "detailedResponse": detailed_response})
 
+    # ---------------------------------------------------------------- Ongrid: bank verification (penny drop)
+    def ongrid_bank_verification_verify(self, account_number: str, ifsc: str):
+        """Real penny-drop bank-account verification. Response envelope's `data`
+        carries `bank_account_data.name` (the registered account-holder name
+        returned by the penny drop) on success; a failed/invalid account comes
+        back as a successful HTTP call with no `bank_account_data` payload, not
+        an exception -- see vdd/resolve/resolvers.py::resolve_com_bank_verification
+        for how that distinction is scored."""
+        return self._cached("/api/vendors/ongrid/bank-verification/verify",
+                             json_body={"accountNumber": account_number, "ifsc": ifsc, "consent": "Y"})
+
     # ---------------------------------------------------------------- Digitap
     # Digitap's response has no `data` wrapper (confirmed against a real PPE call) --
     # unwrap_data=False keeps the payload as-is instead of stripping a nonexistent key.
