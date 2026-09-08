@@ -29,7 +29,7 @@ def _finding_to_dict(f: Finding) -> dict[str, Any]:
 
 def make_tools(client: Optional[FinoscaleClient]) -> list:
     """Builds the reviewer's tool list. `client` may be None (a --no-api
-    run) -- the two live-refetch tools then report unavailable instead of
+    run) -- the live-refetch tools then report unavailable instead of
     raising, same degrade-gracefully idiom used everywhere else in this
     pipeline."""
 
@@ -75,6 +75,52 @@ def make_tools(client: Optional[FinoscaleClient]) -> list:
         except FinoscaleAPIError as e:
             return {"error": f"[{e.status_code}] {e.message}"}
 
+    def recheck_zigram_screening(entity_name: str, type_: str = "Organization",
+                                  pan: str = None, cin: str = None, llpin: str = None) -> dict:
+        """Re-run Zigram's watchlist/sanctions/PEP/adverse-media screening --
+        this pipeline's PRIMARY AML sweep as of 2026-09-08 (real, wide
+        coverage confirmed live: ESIC and other India-specific registries,
+        OFAC-style sanctions, PEP, and ~55 more list categories). Pass
+        whichever real identifier you have -- `pan`, `cin`, or `llpin` --
+        for the entity/person being screened; every confirmed-comprehensive
+        call this session included one. A call with no identifier at all
+        (e.g. a partner named only in GST registration data) has not been
+        tested -- this tool refuses that call rather than guess, so prefer
+        `recheck_pep`/`recheck_sanctions`/`recheck_drt_sarfaesi` for a
+        name-only screen instead.
+
+        How to tell a real response from a hollow one: count the
+        watchlist-category keys inside `entitychecks[0]` -- ~60 keys means
+        real coverage, ~1 key ("Angola Watchlists" only) means a hollow
+        stub. Do NOT use `Subscribed` for this -- confirmed empirically to
+        read empty on BOTH hollow and genuinely comprehensive responses,
+        it is not a useful signal either way. Also do NOT trust
+        `Case_Outcome` (`Status`/`Score`) as a summary on its own -- nor
+        the mere presence of a row in some category's list, since EVERY
+        category (hit or not) carries at least one placeholder row.
+        Instead check each category's entry in the `HitsFound` dict, and
+        only for a nonzero count read the actual matched row's `ListName`,
+        `fuzzy_score`, `match_status`, and `SourceLink` for a real,
+        citable finding.
+
+        Use `type_="Individual"` for a partner/director screened by their
+        own PAN; `type_="Organization"` (default) for the firm itself.
+        Screening a person by name only, with no identifier, is untested --
+        prefer `recheck_pep`/`recheck_sanctions`/`recheck_drt_sarfaesi` for
+        that case instead."""
+        if client is None:
+            return {"error": "no Finoscale API client configured for this run"}
+        identifier = cin or pan or llpin
+        if not identifier:
+            return {"error": "no identifier (pan/cin/llpin) provided -- a name-only Zigram call is "
+                              "untested; use recheck_pep/recheck_sanctions/recheck_drt_sarfaesi instead "
+                              "for a name-only screen"}
+        try:
+            return client.zigram_screening(entity_name=entity_name, client_id=identifier,
+                                            type_=type_, country=["India"], cin=cin, pan=pan, llpin=llpin)
+        except FinoscaleAPIError as e:
+            return {"error": f"[{e.status_code}] {e.message}"}
+
     def web_search(query: str) -> list[dict]:
         """Open-ended web search for anything not covered by the tools
         above (e.g. corroborating a business address or claim). Backed by
@@ -92,4 +138,4 @@ def make_tools(client: Optional[FinoscaleClient]) -> list:
                 for r in response.get("results", [])]
 
     return [recheck_sanctions, recheck_pep, recheck_drt_sarfaesi, recheck_gstin_live,
-            recheck_bank_verification, web_search]
+            recheck_bank_verification, recheck_zigram_screening, web_search]

@@ -27,12 +27,18 @@ DOC_TYPE_PATTERNS: Dict[str, List[str]] = {
     "aadhaar": [r"aadha?ar"],
     "client_photo": [r"customer[\s_-]*photo", r"customer\s*image", r"owner\s*image", r"\bphoto\b"],
     "trade_licence": [r"trade[\s_-]*licen[cs]e", r"shop[\s_-]*act", r"shop[\s_-]*establishment"],
+    # Factory License (Directorate of Industrial Safety and Health) is distinct from
+    # trade_licence (Shops & Establishment) -- classified ahead of the generic
+    # pcb_certificate pattern so "Factory License Certificate.pdf" doesn't fall
+    # through to it via an accidental "certificate" match.
+    "factory_license": [r"factory[\s_-]*licen[cs]e"],
+    "pcb_certificate": [r"\bpcb\b", r"pollution[\s_-]*control", r"consent[\s_-]*to[\s_-]*operate"],
 }
 
 DOC_TYPE_ORDER = [
     "gst_certificate", "gst_portal", "cancelled_cheque", "pan_owner", "pan_entity",
     "msme_certificate", "kyc_form", "electricity_bill", "sale_deed", "landlord_declaration",
-    "rental_agreement", "aadhaar", "client_photo", "trade_licence",
+    "rental_agreement", "aadhaar", "client_photo", "factory_license", "pcb_certificate", "trade_licence",
 ]
 
 # ---------------------------------------------------------------- content-based fallback

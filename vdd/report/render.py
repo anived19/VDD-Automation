@@ -38,17 +38,6 @@ def esc(s):
     return str(s).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
 
-def first_date(s):
-    m = re.search(r'(\d{2})/(\d{2})/(\d{4})', s)
-    if m:
-        return m.group(0)
-    m = re.search(r'(\d{4})-(\d{2})-(\d{2})', s)
-    if m:
-        return f"{m.group(3)}/{m.group(2)}/{m.group(1)}"
-    m = re.search(r'\b(19|20)\d{2}\b', s)
-    return m.group(0) if m else s.strip()
-
-
 def clean_bank(s):
     """Normalize a raw bank name string (e.g. from IFSC lookup or cheque OCR) for display."""
     s = re.split(r'[—/(]| - ', s)[0]

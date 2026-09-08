@@ -33,7 +33,7 @@ from vdd.review.model import build_review_model, select_provider
 from vdd.review.schemas import ReviewReport
 from vdd.review.state import ReviewState
 from vdd.review.tools import make_tools
-from vdd.review.trace import serialize_messages
+from vdd.review.trace import extract_pass_usage, serialize_messages
 from vdd.score.engine import ScoringEngine
 
 logger = logging.getLogger(__name__)
@@ -109,6 +109,7 @@ def llm_review(state: ReviewState) -> dict:
         "findings": report_dict["findings"],
         "passes": [report_dict],
         "message_traces": [serialize_messages(result.get("messages", []))],
+        "pass_usage": [extract_pass_usage(result.get("messages", []))],
         "last_verdict": report_dict["verdict"],
         "provider": provider,
     }

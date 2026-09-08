@@ -58,16 +58,6 @@ def fix_ifsc(raw: str) -> Optional[str]:
     return (m2.group(1) + "0" + m2.group(2)) if m2 else None
 
 
-def _field_after(text: str, label: str, stop_labels=()) -> Optional[str]:
-    """Grab the text on the line(s) following a numbered/plain label, up to
-    the next blank line or the next known label."""
-    pattern = re.escape(label) + r'\s*\n\s*(.+?)(?:\n\s*\n|\n\s*(?:' + \
-        '|'.join(re.escape(s) for s in stop_labels) + r')|\Z)' if stop_labels else \
-        re.escape(label) + r'\s*\n\s*(.+)'
-    m = re.search(pattern, text, re.S)
-    return m.group(1).strip().replace("\n", " ") if m else None
-
-
 # ---------------------------------------------------------------- GST Certificate
 def parse_gst_certificate(text: str) -> dict:
     out = {}
@@ -209,6 +199,17 @@ def parse_cancelled_cheque(text: str) -> dict:
 
 # ---------------------------------------------------------------- Electricity Bill
 def parse_electricity_bill(text: str) -> dict:
+    """Electricity board bill layouts vary a lot state to state -- the
+    "Consumer Name:"/"Address:" labels below matched the original (MSEDCL /
+    Maharashtra-style) bill this was built against, but a real Tamil Nadu
+    TANGEDCO bill (Skandan Plastrix, 2026-09-07) has neither label at all,
+    instead printing "Name/Address & GST of the Consumer" followed by the
+    name then the address on the next two lines. Every field this parser
+    can't find for a given board's format is simply absent, same as always
+    -- resolvers must not guess, but this fallback recovers what a human
+    would obviously read off the bill without needing every board's exact
+    label vocabulary hardcoded.
+    """
     out = {}
     m = re.search(r'Consumer Name\s*[:\-]?\s*(.+)', text)
     if m:
@@ -217,6 +218,13 @@ def parse_electricity_bill(text: str) -> dict:
     if m:
         addr_lines = [l.strip() for l in m.group(1).splitlines() if l.strip()]
         out["address"] = ", ".join(addr_lines)
+
+    if "consumer_name" not in out and "address" not in out:
+        m = re.search(r'Name/Address\s*&?\s*GST of the Consumer\s*\n\s*(.+?)\n\s*(.+?)\n\s*State\s*[:\-]',
+                       text, re.S)
+        if m:
+            out["consumer_name"] = m.group(1).strip()
+            out["address"] = re.sub(r'\s+', ' ', m.group(2)).strip()
     m = re.search(r'Pin Code\s*[:\-]?\s*(\d{6})', text)
     if m:
         out["pincode"] = m.group(1)
@@ -285,24 +293,53 @@ def parse_gst_portal_screenshot(text: str) -> dict:
 
 # ---------------------------------------------------------------- PAN Card
 def parse_pan_card(text: str) -> dict:
-    """Real Indian PAN cards have no "Name:" label -- the cardholder/entity
-    name is just the first non-blank line printed directly under the
-    "GOVT. OF INDIA" header line, before the DOB/formation-date line."""
+    """Two real layouts, both seen in practice:
+    - A physical/scanned PAN card has no "Name:" label -- the
+      cardholder/entity name is just the first non-blank line printed
+      directly under the "GOVT. OF INDIA" header line, before the
+      DOB/formation-date line.
+    - An e-PAN (electronically issued) has NO "GOVT. OF INDIA" header at
+      all -- confirmed on MVIKAS's and Skandan's real entity e-PAN
+      documents (2026-09-07), whose text layout is
+      "<PAN>\\n<date>\\n<NAME>\\n<PAN>\\n<NAME, sometimes wrapped>\\n<date>\\n<footer>".
+      The name is the first non-date, non-footer line right after the PAN
+      number (skipping past the date line in between). This was a real,
+      silent gap before this fix -- both e-PAN documents extracted a `pan`
+      but never a `name`, so `ident_pan_name_match` was unresolved on both
+      vendors despite the name being sitting right there in the text.
+    """
     out = {}
     m = PAN_RE.search(text)
     if m:
         out["pan"] = m.group(0)
-    lines = [l.strip() for l in text.splitlines()]
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+
+    def _is_date(s: str) -> bool:
+        return bool(re.match(r'^\d{2}/\d{2}/\d{4}$', s))
+
     for i, line in enumerate(lines):
         if re.search(r'govt\.?\s*of\s*india', line, re.I):
             for cand in lines[i + 1:]:
-                if not cand:
-                    continue
-                if re.match(r'^\d{2}/\d{2}/\d{4}$', cand) or 'permanent account' in cand.lower():
+                if _is_date(cand) or 'permanent account' in cand.lower():
                     break
                 out["name"] = cand
                 break
             break
+
+    if "name" not in out:
+        for i, line in enumerate(lines):
+            if PAN_RE.fullmatch(line.replace(" ", "")):
+                j = i + 1
+                while j < len(lines) and _is_date(lines[j]):
+                    j += 1
+                if j < len(lines):
+                    cand = lines[j]
+                    if (not _is_date(cand) and 'permanent account' not in cand.lower()
+                            and 'electronically issued' not in cand.lower()
+                            and not PAN_RE.fullmatch(cand.replace(" ", ""))):
+                        out["name"] = cand
+                break
+
     return out
 
 
@@ -338,6 +375,38 @@ def parse_kyc_form(text: str) -> dict:
     return out
 
 
+# ---------------------------------------------------------------- Factory License / PCB Consent
+def parse_factory_license(text: str) -> dict:
+    """Tamil Nadu Directorate of Industrial Safety and Health "Registration
+    and Licence to work a factory" (Form No.4). Only the premises
+    description is extracted -- this is a corroborating-evidence source for
+    a SEPARATE manufacturing premises, not a substitute for the GST-address
+    match itself (see resolve_addr_electricity_bill)."""
+    out = {}
+    m = re.search(r'Registration Number\s*:?\s*([A-Za-z0-9]+)', text)
+    if m:
+        out["registration_number"] = m.group(1).strip()
+    m = re.search(r'Description of Licensed Premises\s*(.+)', text, re.S)
+    if m:
+        out["premises_address"] = re.sub(r'\s+', ' ', m.group(1)).strip()[:400]
+    return out
+
+
+def parse_pcb_certificate(text: str) -> dict:
+    """Tamil Nadu Pollution Control Board "Consent to Operate" (Air/Water,
+    Sections 21/25). Same corroborating-evidence role as
+    parse_factory_license -- confirms a licensed manufacturing premises
+    address independent of the GST-registered office address."""
+    out = {}
+    m = re.search(r'Consent Order No\.?\s*:?\s*([A-Za-z0-9]+)', text, re.I)
+    if m:
+        out["consent_order_no"] = m.group(1).strip()
+    m = re.search(r'(S\.?\s*F\.?\s*No\.?.+?District)', text, re.S | re.I)
+    if m:
+        out["premises_address"] = re.sub(r'\s+', ' ', m.group(1)).strip()[:400]
+    return out
+
+
 PARSERS = {
     "gst_certificate": parse_gst_certificate,
     "msme_certificate": parse_msme_certificate,
@@ -347,6 +416,8 @@ PARSERS = {
     "pan_owner": parse_pan_card,
     "kyc_form": parse_kyc_form,
     "electricity_bill": parse_electricity_bill,
+    "factory_license": parse_factory_license,
+    "pcb_certificate": parse_pcb_certificate,
 }
 
 

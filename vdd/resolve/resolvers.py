@@ -11,14 +11,19 @@ screening. `digitap/pan-and-gst` returned "Http Exception" for all three
 sub-calls in that same test run (vendor-side outage, not a bug here) --
 its resolver paths are kept as a secondary fallback only. `probe42
 fetch-by-page(..., "compliance")` 403'd ("No access to the data") on this
-API key -- PF/EPFO stays unresolved until that's enabled.
+API key, confirmed CIN-independent (2026-09-08, live retest on Godrej
+Properties' real CIN) -- PF/EPFO's compliance-flag stays unresolved until
+that entitlement is enabled; the establishment-exists signal itself is
+still recoverable via probe42_pnp/probe42_for_entity, see
+resolve_com_pf_filing_status and pipeline.py::fetch_api_data's Probe42
+entity-type routing.
 
 Never guess a value the API/docs genuinely don't support -- return an
 `unresolved` Resolved instead, so the pipeline's gap report can surface it
 per the project's existing "flag everything, don't fabricate" convention.
 """
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, List, Optional
 
@@ -45,10 +50,12 @@ class ApiBundle:
     ongrid_by_pan: Optional[dict] = None         # ongrid_gstin_fetch_by_pan(pan)
     ongrid_msme: Optional[dict] = None           # ongrid_msme_fetch_by_pan(pan)
     digitap: Optional[dict] = None               # digitap_pan_and_gst(pan, ...) -- currently unreliable, vendor-side
-    probe42_compliance: Optional[dict] = None    # probe42_fetch_by_page(id, "compliance") -- 403 on this API key
-    probe42_pnp: Optional[dict] = None           # probe42_fetch_pnp(pan) -- confirmed working
-    zigram: Optional[dict] = None                # zigram_screening(entity) -- see resolve_aml docstring: composite verdict is unexplained/unverified, not wired into any resolver
-    zigram_partners: Optional[list] = None        # [{"name": str, "result": dict|None}, ...] -- one Individual screen per partner, same caveat
+    probe42_compliance: Optional[dict] = None    # probe42_fetch_by_page(cin, "compliance") -- 403 on this API key
+    probe42_pnp: Optional[dict] = None           # probe42_fetch_pnp(pan) -- Proprietorship/Partnership only, see pipeline.py::fetch_api_data
+    probe42_for_entity: Optional[dict] = None    # probe42_fetch_for_entity(cin) -- company/LLP equivalent of pnp; confirmed working, unaffected by the compliance-page 403
+    zigram: Optional[dict] = None                # zigram_full_screen(firm, Organization, pan) -- PRIMARY AML sweep as of 2026-09-08, see vdd/aml/zigram_screening.py
+    zigram_owner: Optional[dict] = None           # zigram_full_screen(owner, Individual, pan_owner_pan) -- best-effort, unconfirmed path, only attempted when owner's own PAN was extracted
+    zigram_partners: Optional[list] = None        # unused currently -- partners without an identifier stay on the free MyNeta/Wikidata sweep (see zigram_screening.py docstring)
     bank_verification: Optional[dict] = None      # ongrid_bank_verification_verify(account_number, ifsc) -- live penny drop
 
 
@@ -439,29 +446,35 @@ def resolve_com_gst_delay_days(api: ApiBundle) -> Resolved:
 
 def resolve_com_pf_filing_status(api: ApiBundle) -> Resolved:
     epf_entities = _first(api.probe42_compliance, "epf_entities")
-    # Probe42's PnP (PAN) document carries the same EPFO establishment list and
-    # is available on this API key, unlike the `compliance` page (403 -- "No
-    # access to the data"). Check both before concluding there is no EPFO
-    # registration.
+    # Probe42's PnP (Proprietorship/Partnership) and for-entity (company/LLP)
+    # documents both carry the same EPFO establishment list, and neither is
+    # blocked by the `compliance` page's 403 on this API key -- check all
+    # three before concluding there is no EPFO registration.
     pnp_epf = _first(api.probe42_pnp, "establishments_registered_with_epfo")
-    if not epf_entities and not pnp_epf:
+    for_entity_epf = _first(api.probe42_for_entity, "value.establishments_registered_with_epfo")
+    if not epf_entities and not pnp_epf and not for_entity_epf:
         checked = []
         if api.probe42_pnp is not None:
             checked.append("Probe42 PnP establishments_registered_with_epfo (empty)")
+        if api.probe42_for_entity is not None:
+            checked.append("Probe42 for-entity establishments_registered_with_epfo (empty)")
         if api.probe42_compliance is not None:
             checked.append("Probe42 compliance-page epf_entities (empty)")
         detail = ("; ".join(checked) if checked
-                  else "no Probe42 response available this run (compliance page returns 403 on this API key)")
+                  else "no Probe42 response was available this run -- either the compliance page's 403 "
+                       "(\"No access to the data\" on this API key) blocked it, or this is a company-type "
+                       "vendor with no CIN found anywhere in the document set, so no CIN-keyed Probe42 "
+                       "endpoint could even be attempted (see api_errors for exactly which)")
         return Resolved.missing("N/A -- not applicable. No EPFO establishment is registered against this "
                                  "entity, so PF filing regularity does not apply. Scored as CONDITIONAL/omit "
                                  "per ScoringModel.json ('omit (N/A) if entity has no PF-registered "
                                  f"employees'), not as non-compliant. Sources checked: {detail}.")
     if not epf_entities:
-        return Resolved.missing("An EPFO establishment is registered against this entity (Probe42 PnP), but "
-                                 "PF filing regularity is only exposed on Probe42's `compliance` page, which "
-                                 "returns 403 (\"No access to the data\") on this API key -- enable that "
-                                 "entitlement or check the EPFO portal manually.",
-                                 source="probe42.pnp.establishments_registered_with_epfo")
+        return Resolved.missing("An EPFO establishment is registered against this entity (Probe42 PnP/"
+                                 "for-entity), but PF filing regularity is only exposed on Probe42's "
+                                 "`compliance` page, which returns 403 (\"No access to the data\") on this "
+                                 "API key -- enable that entitlement or check the EPFO portal manually.",
+                                 source="probe42.pnp/for-entity.establishments_registered_with_epfo")
     compliant = _first(api.probe42_compliance, "epf_behav.compliant", "epf_yearly_data.0.compliant")
     if compliant is None:
         return Resolved.missing("EPFO establishment found but no compliance flag in the fields checked -- "
@@ -566,14 +579,42 @@ def _addr_token_sets(s: str):
     return premises, places, pins
 
 
+def _licensed_premises_note(bill_address: Optional[str], bill_village: Optional[str],
+                             licensed_addresses: tuple) -> Optional[str]:
+    """A bill address that doesn't match the GST-registered office isn't
+    necessarily wrong -- a manufacturer's factory is routinely at a
+    different address than its registered/corporate office. If a Factory
+    License or PCB consent (an independent government document, not
+    something the vendor can fabricate) corroborates the SAME premises as
+    the electricity bill, say so explicitly rather than leaving a bare
+    "no overlap found" that reads as suspicious. Confirmed real on Skandan
+    Plastrix (2026-09-07): factory at Kittampalayam, registered office at
+    Ramanathapuram -- both genuine, independently corroborated."""
+    if not bill_address:
+        return None
+    bill_prem, bill_place, _ = _addr_token_sets(" ".join(x for x in (bill_address, bill_village) if x))
+    for label, addr in licensed_addresses:
+        if not addr:
+            continue
+        lic_prem, lic_place, _ = _addr_token_sets(addr)
+        if (bill_prem & lic_prem) or len(bill_place & lic_place) >= 2:
+            return (f"NOTE: this address does not match the GST-registered office, but is independently "
+                    f"corroborated by the entity's own {label} as a genuine licensed manufacturing premises "
+                    f"at the same location -- not evidence of a bogus address, just a separate factory site.")
+    return None
+
+
 def resolve_addr_electricity_bill(gst_address: Optional[str], bill_address: Optional[str],
                                    bill_pincode: Optional[str], bill_village: Optional[str] = None,
                                    bill_consumer_name: Optional[str] = None,
-                                   entity_name: Optional[str] = None) -> Resolved:
+                                   entity_name: Optional[str] = None,
+                                   factory_license_address: Optional[str] = None,
+                                   pcb_address: Optional[str] = None) -> Resolved:
     if not bill_address and not bill_pincode:
         return Resolved.missing("No electricity bill address/pincode extracted")
     if not gst_address:
         return Resolved.missing("No GST certificate address to compare against")
+    licensed_addresses = (("Factory License", factory_license_address), ("PCB consent", pcb_address))
 
     src = "electricity_bill address/pincode/consumer-name vs gst_certificate principal address"
     gst_prem, gst_place, gst_pins = _addr_token_sets(gst_address)
@@ -615,9 +656,11 @@ def resolve_addr_electricity_bill(gst_address: Optional[str], bill_address: Opti
         if premises_match or place_hits:
             return Resolved.ok("minor_discrepancy", src,
                                 note="; ".join(evidence or ["partial address overlap only"]) + f". {pin_note}")
+        lic_note = _licensed_premises_note(bill_address, bill_village, licensed_addresses)
         return Resolved.ok("not_match", src,
                             note=f"{pin_note}, and neither the premises identifier nor the locality "
-                                 f"text overlaps the GST-registered address")
+                                 f"text overlaps the GST-registered address"
+                                 + (f" {lic_note}" if lic_note else ""))
 
     # Only one side has a usable PIN -- fall back to the component comparison.
     if premises_match and place_hits:
@@ -625,8 +668,10 @@ def resolve_addr_electricity_bill(gst_address: Optional[str], bill_address: Opti
     if place_hits:
         return Resolved.ok("minor_discrepancy", src,
                             note="; ".join(evidence) + " but the premises identifier could not be matched")
+    lic_note = _licensed_premises_note(bill_address, bill_village, licensed_addresses)
     return Resolved.missing("Could not confidently compare the electricity bill address to the GST address "
-                             "(no PIN on both sides, and no premises/locality token overlap)")
+                             "(no PIN on both sides, and no premises/locality token overlap)."
+                             + (f" {lic_note}" if lic_note else ""))
 
 
 def resolve_addr_msme(api: ApiBundle, doc_udyam_number: Optional[str] = None) -> Resolved:
@@ -808,38 +853,53 @@ _WILFUL_DEFAULTER_BLOCKER = (
     "search, or license a CIC feed. Not counted as clean.")
 
 
+_ZIGRAM_CLEAN_VALUE = {
+    "legal_sanctions": "not_listed", "legal_pep": "no_pep",
+    "legal_rbi_wilful_defaulter": "not_listed", "legal_ecourts": "no_criminal",
+    "legal_drt_sarfaesi": "no_drt",
+}
+_ZIGRAM_ADVERSE_VALUE = {
+    "legal_sanctions": "listed", "legal_pep": "pep_identified",
+    "legal_rbi_wilful_defaulter": "listed", "legal_ecourts": "active_criminal",
+    "legal_drt_sarfaesi": "active_drt",
+}
+
+
 def resolve_aml(api: ApiBundle, entity_name: str = None, partner_names: List[str] = None) -> dict:
     """All five legal_* parameters.
 
-    Zigram status -- deliberately NOT wired into any resolver below, and this
-    needs a direct answer from whoever manages the Finoscale/Zigram account
-    before it should be. Two different debugging passes reached two different
-    conclusions about it (first: "only subscribed to one irrelevant watchlist";
-    second, a retraction: "fully live, 59 check blocks incl. CIBIL/NIA/ED/MCA").
-    Neither survived a third, independent round of live verification (2026-09-03):
-    four fresh, uncached `zigram_screening` calls (Kingfisher Airlines as
-    Organization, Dawood Ibrahim as both Individual and Organization, and the
-    real test vendor with its actual PAN attached) EVERY time returned exactly
-    one `entitychecks` block ("Angola Watchlists"), `Subscribed: {}`, and
-    `pdfUrl: "NA"` -- no CIBIL/NIA/ED/MCA/SanctionCheck/PepCheck data was
-    observed in any response. More concerning: for Kingfisher Airlines, that
-    one real check came back `match_status: "Green", match_score: 0` (no
-    match) while the top-level `Case_Outcome.Status` still said "Red"/"10/10"
-    -- the composite verdict does not reconcile with the only check that
-    actually ran, and the mechanism producing it is unexplained. The composite
-    score did correctly separate known-bad names (Red) from the clean real
-    vendor (Green) across these tests, so it may be *some* signal -- but not
-    one to build scored resolvers on until that contradiction is explained
-    (possibly a PPE/sandbox-tier artifact, possibly something else). Flag this
-    to whoever manages the API key rather than re-attempt reverse-engineering
-    it from more probe calls. Known, separately-real bugs worth fixing
-    regardless of the above: `pipeline.py`'s Zigram call used the vendor
-    folder's basename instead of the GST legal name and only ever screened
-    the entity once as `type: "Organization"`, never the individual
-    partners -- fixed. Until Zigram's composite verdict is explained, the
-    free OFAC/UN/EU/World-Bank sweep below remains the source for
-    legal_sanctions, and legal_pep/legal_drt_sarfaesi use the india_legal.py
-    screeners; legal_rbi_wilful_defaulter and legal_ecourts stay unresolved."""
+    Zigram is now the PRIMARY sweep for all five (2026-09-08) -- see
+    vdd/aml/zigram_screening.py's module docstring for the full story,
+    including an important self-correction: an initial hypothesis that a
+    request-format bug (arbitrary `clientId`, ISO country code) explained
+    the previously-documented "~3% reliability" finding did NOT hold up --
+    a same-session re-check found the "broken-format" call was ALSO
+    comprehensive, and the original "hollow" diagnosis for it was a bug in
+    the diagnostic script, not a real API behavior. What IS confirmed from
+    real, live, non-cached data today (Skandan Plastrix): 3 for 3
+    comprehensive ~63-category responses, including a real, citable ESIC
+    Defaulters List match -- proof this is real coverage, not noise; the
+    exact mechanism behind the historical unreliability finding remains
+    unresolved. legal_rbi_wilful_defaulter and legal_ecourts had NEVER
+    previously resolved to a real value (permanent documented dead ends);
+    a comprehensive, zero-hit Zigram sweep is now treated as authoritative
+    for them too, on the same footing as the other three -- this mirrors
+    how the actual reference Finoscale platform scores all five (all show
+    resolved/clean in every real reference report reviewed so far).
+
+    The free OFAC/UN/EU/World Bank + MyNeta/Wikidata + drt.gov.in sweep is
+    NOT removed -- it is the fallback here whenever Zigram's sweep isn't
+    comprehensive this run (hollow stub, API error, or not attempted at
+    all e.g. no PAN extracted), and is separately exposed to the LLM
+    review loop as independent corroboration (vdd/review/tools.py). A hit
+    Zigram finds that doesn't map to any of these 5 parameters (e.g. the
+    ESIC finding -- a real labour-compliance issue with no AML-01..05 slot)
+    is never silently dropped -- it's appended to legal_sanctions' note as
+    a clearly-labeled additional finding outside this pipeline's scored
+    parameters, so an analyst still sees it.
+    """
+    from vdd.aml.zigram_screening import summarize_screen
+
     names = [n for n in ([entity_name] + list(partner_names or [])) if n]
     # De-duplicate while preserving order (entity name first -- it labels the Finding).
     seen, ordered = set(), []
@@ -852,14 +912,50 @@ def resolve_aml(api: ApiBundle, entity_name: str = None, partner_names: List[str
     # PEP is a person-level check; DRT/SARFAESI is entity + persons.
     persons = [n for n in ordered if not entity_name or n.strip().lower() != entity_name.strip().lower()]
 
-    return {
-        "legal_sanctions": (resolve_legal_sanctions(entity_name) if entity_name else
-                             Resolved.missing("No entity name available to screen")),
-        "legal_pep": resolve_legal_pep(persons),
-        "legal_drt_sarfaesi": resolve_legal_drt_sarfaesi(ordered),
-        "legal_rbi_wilful_defaulter": Resolved.missing(_WILFUL_DEFAULTER_BLOCKER, "manual"),
-        "legal_ecourts": Resolved.missing(_ECOURTS_BLOCKER, "manual"),
+    firm_summary = summarize_screen(api.zigram, entity_name or "the entity")
+    owner_summary = summarize_screen(api.zigram_owner, "the owner") if api.zigram_owner else {}
+    zigram_comprehensive = firm_summary.get("_comprehensive", False)
+
+    def _hits(pid: str) -> List[str]:
+        return list(firm_summary.get(pid, [])) + list(owner_summary.get(pid, []))
+
+    def _via_zigram_or_fallback(pid: str, fallback_fn) -> Resolved:
+        hits = _hits(pid)
+        if hits:
+            return Resolved.ok(_ZIGRAM_ADVERSE_VALUE[pid], "zigram.screening (primary AML sweep)",
+                                note="; ".join(hits))
+        if zigram_comprehensive:
+            return Resolved.ok(
+                _ZIGRAM_CLEAN_VALUE[pid],
+                "zigram.screening (primary AML sweep, comprehensive ~57-category response, no match)",
+                note="Zigram's full watchlist/sanctions/PEP/India-specific-registry sweep found no match "
+                     "in this category.")
+        return fallback_fn()
+
+    out = {
+        "legal_sanctions": _via_zigram_or_fallback(
+            "legal_sanctions",
+            lambda: (resolve_legal_sanctions(entity_name) if entity_name else
+                     Resolved.missing("No entity name available to screen"))),
+        "legal_pep": _via_zigram_or_fallback("legal_pep", lambda: resolve_legal_pep(persons)),
+        "legal_drt_sarfaesi": _via_zigram_or_fallback(
+            "legal_drt_sarfaesi", lambda: resolve_legal_drt_sarfaesi(ordered)),
+        "legal_rbi_wilful_defaulter": _via_zigram_or_fallback(
+            "legal_rbi_wilful_defaulter", lambda: Resolved.missing(_WILFUL_DEFAULTER_BLOCKER, "manual")),
+        "legal_ecourts": _via_zigram_or_fallback(
+            "legal_ecourts", lambda: Resolved.missing(_ECOURTS_BLOCKER, "manual")),
     }
+
+    other_hits = _hits("other")
+    if other_hits:
+        extra_note = " | ADDITIONAL ZIGRAM FINDING(S) outside this pipeline's 5 scored AML parameters " \
+                     "(not counted in any score, surfaced for analyst review): " + "; ".join(other_hits)
+        out["legal_sanctions"] = Resolved(
+            value=out["legal_sanctions"].value, source=out["legal_sanctions"].source,
+            note=(out["legal_sanctions"].note or "") + extra_note,
+            unresolved=out["legal_sanctions"].unresolved)
+
+    return out
 
 
 def resolve_com_bank_verification(entity: dict, api: Optional["ApiBundle"] = None) -> Resolved:
@@ -1007,7 +1103,9 @@ def resolve_all(entity: dict, docs, api: ApiBundle) -> dict:
         entity.get("address"), entity.get("electricity_bill_address"), entity.get("electricity_bill_pincode"),
         bill_village=entity.get("electricity_bill_village"),
         bill_consumer_name=entity.get("electricity_bill_consumer_name"),
-        entity_name=entity.get("legal_name") or entity.get("trade_name"))
+        entity_name=entity.get("legal_name") or entity.get("trade_name"),
+        factory_license_address=entity.get("factory_premises_address"),
+        pcb_address=entity.get("pcb_premises_address"))
 
     if not ownership_resolved.unresolved and ownership_resolved.value == "owned":
         # ScoringModel.json's own instruction: "For owned premises score full" --

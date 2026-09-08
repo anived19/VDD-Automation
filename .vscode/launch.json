@@ -29,6 +29,15 @@
             ]
         },
         {
+            "name": "Run VDD webapp (Flask demo)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/webapp/app.py",
+            "console": "integratedTerminal",
+            "python": "C:\\Python313\\python.exe",
+            "cwd": "${workspaceFolder}/webapp"
+        },
+        {
             "name": "Run pytest",
             "type": "debugpy",
             "request": "launch",

@@ -167,7 +167,17 @@ def _findings(result: ScoreResult, entity: dict = None) -> list:
 
     aml_resolved = [p for p in aml.params if not p.unresolved]
     aml_missing = [p for p in aml.params if p.unresolved]
-    if aml_resolved and not aml_missing and all(p.assigned_score >= p.max_score for p in aml_resolved if p.max_score):
+    # See _chips()'s identical check -- a Zigram hit outside the 5 scored AML
+    # parameters (e.g. an ESIC Defaulters List match) never lowers any
+    # parameter's score, but "clean" language must not be shown over it.
+    aml_other_finding = any("ADDITIONAL ZIGRAM FINDING" in (p.note or "") for p in aml.params)
+    if aml_other_finding:
+        other_note = next(p.note for p in aml.params if "ADDITIONAL ZIGRAM FINDING" in (p.note or ""))
+        extra = other_note.split("ADDITIONAL ZIGRAM FINDING", 1)[1].split(":", 1)[-1].strip(" .:")
+        out.append(("n", f"Zigram screening found an adverse record outside this report's 5 scored "
+                          f"AML parameters &mdash; NOT reflected in the AML score above: {esc(extra[:280])}"))
+    if aml_resolved and not aml_missing and not aml_other_finding \
+            and all(p.assigned_score >= p.max_score for p in aml_resolved if p.max_score):
         out.append(("c", "Clean Legal/AML &mdash; no sanctions, PEP, wilful-defaulter, eCourt or DRT/SARFAESI "
                           f"records ({int(aml.earned)}/{int(aml.max_score) if aml.max_score else 5})"))
     elif aml_resolved and all(p.assigned_score >= p.max_score for p in aml_resolved if p.max_score):
@@ -293,7 +303,13 @@ def _chips(entity: dict, result: ScoreResult, loc: str, seller_type: str) -> lis
 
     aml_missing = [p for p in aml.params if p.unresolved]
     aml_hits = [p for p in aml.params if not p.unresolved and p.max_score and p.assigned_score < p.max_score]
-    if aml_hits:
+    # A Zigram hit outside this pipeline's 5 scored AML parameters (e.g. an ESIC
+    # Defaulters List match -- real, government-sourced, but not a sanctions/PEP/
+    # wilful-defaulter/eCourts/DRT hit specifically) never lowers any parameter's
+    # score (see resolve_aml()), but a "Cleared" badge must never be shown over a
+    # known real adverse finding just because it doesn't fit one of those 5 slots.
+    aml_other_finding = any("ADDITIONAL ZIGRAM FINDING" in (p.note or "") for p in aml.params)
+    if aml_hits or aml_other_finding:
         chips.append(("amber", "! AML Adverse Finding"))
     elif aml_missing:
         chips.append(("amber", f"AML Partially Screened ({len(aml.params) - len(aml_missing)}/{len(aml.params)})"))

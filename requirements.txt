@@ -7,10 +7,16 @@ weasyprint>=69.0
 pdfplumber>=0.11
 pytest>=8.0
 
-# Optional OCR fallback for extract/ocr.py -- code degrades gracefully
-# (marks the field unresolved) if this isn't installed. No document
-# image/bytes are ever sent to any LLM -- there is deliberately no vision
-# fallback tier here (see extract/ocr.py's module docstring).
+# OCR for extract/ocr.py -- all local, offline at inference time, no
+# document image/bytes ever sent to any LLM or third-party API (see
+# extract/ocr.py's module docstring). easyocr is the primary engine (a
+# local neural OCR model -- CPU-only here, model weights are a one-time
+# generic public download cached under ~/.EasyOCR, not document data).
+# pytesseract is a soft-dependency second opinion -- code degrades
+# gracefully (falls through to the next tier) if the Tesseract binary
+# itself isn't also on PATH.
+easyocr>=1.7
+opencv-python-headless>=4.9   # detect_diagonal_strike()'s Canny/Hough check
 pytesseract>=0.3      # also needs the Tesseract binary on PATH
 
 # LLM review loop (vdd/review/) -- reads the deterministic report, decides

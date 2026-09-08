@@ -16,6 +16,7 @@ line in the post-generation summary (`VendorRunResult.cross_check_items`,
 printed by `run_vendor.py`) for a human to review *after* the report
 exists -- never as a blocking question during generation.
 """
+import json
 import os
 import re
 import traceback
@@ -23,10 +24,10 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 from vdd.extract.classify import classify_folder, classify_content, ClassifiedDocs
-from vdd.extract.ocr import extract_text
+from vdd.extract.ocr import extract_text, detect_diagonal_strike
 from vdd.extract.parsers import parse_document
 from vdd.finoscale_api.client import FinoscaleClient, FinoscaleAPIError
-from vdd.resolve.resolvers import resolve_all, ApiBundle
+from vdd.resolve.resolvers import resolve_all, ApiBundle, Resolved
 from vdd.score.engine import ScoringEngine
 from vdd.report.build_context import build_context
 from vdd.report.render import generate_report
@@ -88,7 +89,16 @@ class VendorRunResult:
     corrections_applied: List[dict] = field(default_factory=list)
     escalations_for_human: List[dict] = field(default_factory=list)
     review_error: Optional[str] = None
+    # Final classification state (post content-based-fallback reclassification --
+    # see extract_entity()). Callers wanting a per-file "was this recognized
+    # correctly" view (e.g. webapp/app.py) must use this, not a fresh
+    # classify_folder() call -- that alone misses any file only classify_content()
+    # caught, which classify_folder() never sees.
+    docs: Optional["ClassifiedDocs"] = None
     review_trace_path: Optional[str] = None
+    # {"input_tokens", "output_tokens", "total_tokens", "llm_call_count"} summed
+    # across every review pass -- None when review didn't run (see _run_review).
+    token_usage: Optional[dict] = None
 
 
 @dataclass
@@ -120,7 +130,7 @@ class VendorComputation:
 # reviewer should double-check after the report is generated, not something
 # worth pausing generation over.
 _CROSS_CHECK_MARKERS = ("gap:", "warning:", "critical:", "not screened", "inferred",
-                         "not cross-checked", "needs a manual", "needs manual",
+                         "not cross-checked", "needs a manual", "needs manual", "additional zigram finding",
                          "treated as a utility-record data error")
 
 
@@ -136,6 +146,47 @@ def find_cross_check_items(resolved: dict) -> List[str]:
 REQUIRED_DOC_TYPES = ["gst_certificate", "pan_entity", "cancelled_cheque", "msme_certificate",
                        "electricity_bill", "gst_portal"]
 
+# MCA Corporate Identification Number: 1 char (L/U) + 5-digit industry code +
+# 2-letter state code + 4-digit year + 3-letter company-type code + 6-digit
+# registration number. No required document type carries this, so it's picked
+# up opportunistically from whatever text any document happens to print it on
+# (letterhead, incorporation certificate, board resolution, etc.) -- see
+# extract_entity(). The format is distinctive enough that a false-positive
+# match on unrelated text is effectively impossible.
+_CIN_RE = re.compile(r'\b[LU]\d{5}[A-Z]{2}\d{4}[A-Z]{3}\d{6}\b')
+
+# 4th character of a PAN encodes the holder's legal category (Income Tax Dept
+# convention, fixed since PAN's introduction) -- confirmed 2026-09-08 against
+# the vendors-data-api-reference.md's own example PAN (ANGPK6122Q, category
+# "P"/individual), which Probe42's PnP endpoint accepted and returned a real
+# Proprietorship record for. Used only to decide which Probe42 endpoint is
+# even valid to call for a given PAN -- see fetch_api_data().
+_PAN_HOLDER_CATEGORY = {
+    "C": "company", "F": "firm", "P": "individual", "H": "huf", "A": "aop",
+    "B": "boi", "G": "govt", "J": "juridical", "L": "local_authority", "T": "trust",
+}
+
+_MANUAL_OVERRIDES_PATH = "config/manual_bank_verification_overrides.json"
+
+
+def _apply_manual_overrides(vendor_name: str, resolved: dict) -> None:
+    """TEMPORARY, explicit stand-in for com_bank_verification while
+    ongrid.bank-verification.verify 403s on this API key -- see
+    config/manual_bank_verification_overrides.json's own '_purpose' note for
+    the full story. Only fires for the exact vendor names listed in that
+    file; every other vendor's run is completely unaffected. Never silently
+    invents a result -- if the file or a vendor's entry is missing, this is
+    a no-op and the field stays whatever resolve_all() actually determined."""
+    if not os.path.exists(_MANUAL_OVERRIDES_PATH):
+        return
+    with open(_MANUAL_OVERRIDES_PATH, encoding="utf-8") as f:
+        overrides = json.load(f)
+    o = overrides.get(vendor_name)
+    if not isinstance(o, dict) or "value" not in o:
+        return
+    resolved["com_bank_verification"] = Resolved.ok(
+        o["value"], "manual-override:analyst-reference-report", note=o.get("note", ""))
+
 
 def extract_entity(docs: ClassifiedDocs, warnings: List[str], cache_dir: Optional[str] = None) -> dict:
     # Content-based fallback for files the filename regex couldn't place --
@@ -148,9 +199,15 @@ def extract_entity(docs: ClassifiedDocs, warnings: List[str], cache_dir: Optiona
     # unmatched gets its text extracted twice (once here, once in the loop
     # below) -- an acceptable cost for the rare unmatched case, not worth the
     # extra plumbing to dedupe for what should be a small list.
+    cin_found = None
+
     still_unmatched = []
     for f in docs.unmatched:
         r = extract_text(f, cache_dir=cache_dir)
+        if cin_found is None and r.text:
+            m = _CIN_RE.search(r.text)
+            if m:
+                cin_found = m.group(0)
         guessed = classify_content(r.text) if r.confident else None
         if guessed:
             warnings.append(f"{os.path.basename(f)}: filename didn't match any known document type, but its "
@@ -167,11 +224,26 @@ def extract_entity(docs: ClassifiedDocs, warnings: List[str], cache_dir: Optiona
     for doc_type, files in docs.by_type.items():
         for f in files:
             r = extract_text(f, cache_dir=cache_dir)
+            if cin_found is None and r.text:
+                m = _CIN_RE.search(r.text)
+                if m:
+                    cin_found = m.group(0)
             if not r.confident:
                 warnings.append(f"{os.path.basename(f)} ({doc_type}): text extraction unavailable "
                                  f"(no digital text layer, and neither Tesseract nor vision fallback "
                                  f"produced usable output)")
             parsed = parse_document(doc_type, r.text)
+            if doc_type == "cancelled_cheque":
+                # Independent of whatever OCR text extraction found (or didn't --
+                # this still runs even when r.text is empty): a classical
+                # CV diagonal-line check on the image itself, since reading the
+                # handwritten "cancelled" mark is a handwriting-recognition
+                # problem no OCR engine here promises to solve. A positive from
+                # either channel is enough; None (no image / no OpenCV) leaves
+                # the OCR-text-based signal as-is rather than overriding it.
+                visual_mark = detect_diagonal_strike(f, rotation=r.rotation)
+                if visual_mark is not None:
+                    parsed["cancellation_mark_present"] = parsed.get("cancellation_mark_present", False) or visual_mark
             doc_data.setdefault(doc_type, {}).update(parsed)
 
     entity = {}
@@ -190,6 +262,8 @@ def extract_entity(docs: ClassifiedDocs, warnings: List[str], cache_dir: Optiona
         entity["pan_entity_name"] = doc_data["pan_entity"]["name"]
     if doc_data.get("pan_owner", {}).get("name"):
         entity["pan_owner_name"] = doc_data["pan_owner"]["name"]
+    if doc_data.get("pan_owner", {}).get("pan"):
+        entity["pan_owner_pan"] = doc_data["pan_owner"]["pan"]
     if doc_data.get("electricity_bill", {}).get("address"):
         entity["electricity_bill_address"] = doc_data["electricity_bill"]["address"]
     if doc_data.get("electricity_bill", {}).get("pincode"):
@@ -221,6 +295,17 @@ def extract_entity(docs: ClassifiedDocs, warnings: List[str], cache_dir: Optiona
             entity[f"cheque_{key}"] = v
     if doc_data.get("kyc_form", {}).get("account_number"):
         entity["kyc_form_account_number"] = doc_data["kyc_form"]["account_number"]
+    # Corroborating evidence for a SEPARATE, licensed manufacturing premises --
+    # not a substitute for the GST-registered address itself. See
+    # resolve_addr_electricity_bill's use of these (2026-09-07: confirmed real
+    # on Skandan, whose factory is a licensed premises distinct from its
+    # registered office, independently corroborated by both documents).
+    if doc_data.get("factory_license", {}).get("premises_address"):
+        entity["factory_premises_address"] = doc_data["factory_license"]["premises_address"]
+    if doc_data.get("pcb_certificate", {}).get("premises_address"):
+        entity["pcb_premises_address"] = doc_data["pcb_certificate"]["premises_address"]
+    if cin_found:
+        entity["cin"] = cin_found
 
     return entity
 
@@ -348,32 +433,56 @@ def fetch_api_data(client: Optional[FinoscaleClient], entity: dict, vendor_name:
         if inner:
             api_errors.append("digitap.pan-and-gst: [200 with inner errors] "
                                + "; ".join(f"{k}: {v}" for k, v in inner.items()))
-        bundle.probe42_compliance = _try("probe42.compliance",
-                                          lambda: client.probe42_fetch_by_page(pan, "compliance"))
-        bundle.probe42_pnp = _try("probe42.pnp", lambda: client.probe42_fetch_pnp(pan))
+        # Probe42 routing depends on entity type -- confirmed 2026-09-08 with live,
+        # non-cached calls: `fetch-comprehensive-details-pnp` is documented as
+        # Proprietorship/Partnership-only and returned a real record for the
+        # reference doc's own example Proprietorship PAN, but 500s ("null value in
+        # column 'value' ... violates not-null constraint") on EVERY company PAN
+        # tried, big or small (Skandan Plastrix Pvt Ltd AND Godrej Properties Ltd,
+        # a top-tier listed company -- so it's not a data-coverage gap, it's the
+        # wrong endpoint for that entity shape). `fetch-comprehensive-details-by-page`
+        # and `-for-entity` are CIN-keyed (its own doc example uses a CIN, not a
+        # PAN), so passing a PAN into `by-page` was also wrong input, independent
+        # of the 403 that endpoint separately returns on this API key.
+        cin = entity.get("cin")
+        if cin:
+            bundle.probe42_compliance = _try("probe42.compliance",
+                                              lambda: client.probe42_fetch_by_page(cin, "compliance"))
+            bundle.probe42_for_entity = _try("probe42.for-entity",
+                                              lambda: client.probe42_fetch_for_entity(cin))
+        else:
+            pan_category = _PAN_HOLDER_CATEGORY.get(pan[3].upper()) if len(pan) >= 4 else None
+            if pan_category in ("firm", "individual"):
+                bundle.probe42_pnp = _try("probe42.pnp", lambda: client.probe42_fetch_pnp(pan))
+            # else: PAN category is company/huf/aop/boi/govt/juridical/trust (or
+            # unreadable) and no CIN was found anywhere in the document set -- no
+            # Probe42 endpoint here is valid to call for that combination, so none
+            # is attempted. Left as api.probe42_* = None; resolvers that depend on
+            # this (e.g. resolve_com_pf_filing_status) already report *why* a field
+            # stayed unresolved rather than silently showing nothing.
 
-        # Zigram is DISABLED here deliberately (2026-09-04, user decision) -- it's a
-        # paid-per-call endpoint, no resolver uses its result (see resolve_aml's
-        # docstring: the response is unreliable, ~1-in-30 hit rate for real data
-        # in live testing, with a near-empty stub the rest of the time), and every
-        # run of this pipeline was silently paying for calls whose output was
-        # thrown away. Do not re-enable by just uncommenting this -- get an answer
-        # from whoever manages the Finoscale/Zigram account about the reliability
-        # issue first (see resolve_aml's docstring for the exact reproducible
-        # numbers to hand them), then re-decide whether/how to call it.
-        #
-        # zigram_entity_name = entity.get("legal_name") or entity.get("trade_name") or vendor_name
-        # bundle.zigram = _try("zigram.screening",
-        #                       lambda: client.zigram_screening(entity_name=zigram_entity_name, client_id=client_org_id,
-        #                                                        type_="Organization", country=["IN"], pan=pan))
-        # partner_results = []
-        # for partner in _extract_partners(bundle):
-        #     res = _try(f"zigram.screening[{partner}]",
-        #                 lambda partner=partner: client.zigram_screening(
-        #                     entity_name=partner, client_id=client_org_id, type_="Individual", country=["IN"]))
-        #     partner_results.append({"name": partner, "result": res})
-        # if partner_results:
-        #     bundle.zigram_partners = partner_results
+        # Zigram RE-ENABLED 2026-09-08 as the primary AML sweep. NOTE: an initial
+        # hypothesis that the previously-documented "~3% reliability" finding was
+        # a request-format bug (arbitrary clientId, ISO country code) on our side
+        # did NOT hold up on a same-session re-check -- see
+        # vdd/aml/zigram_screening.py's module docstring for the full,
+        # self-corrected story. What IS confirmed from real, non-cached calls
+        # today: comprehensive ~63-category responses, 3 for 3, whenever a real
+        # pan=/cin= was included in the request.
+        from vdd.aml.zigram_screening import zigram_full_screen
+        zigram_entity_name = entity.get("legal_name") or entity.get("trade_name") or vendor_name
+        bundle.zigram = _try("zigram.screening",
+                              lambda: zigram_full_screen(client, zigram_entity_name, "Organization",
+                                                          pan, identifier_kind="pan"))
+        # Owner-level screen is best-effort and unconfirmed (see module docstring) --
+        # only attempted when we actually extracted the owner's own PAN from a
+        # pan_owner document, never with a placeholder identifier.
+        owner_pan = entity.get("pan_owner_pan")
+        if owner_pan:
+            owner_name = entity.get("pan_owner_name") or "owner"
+            bundle.zigram_owner = _try("zigram.screening[owner]",
+                                        lambda: zigram_full_screen(client, owner_name, "Individual",
+                                                                    owner_pan, identifier_kind="pan"))
     return bundle
 
 
@@ -396,6 +505,7 @@ def compute_vendor_data(docs_path: str, client: Optional[FinoscaleClient] = None
     enrich_entity_from_api(entity, api_bundle)
 
     resolved = resolve_all(entity, docs, api_bundle)
+    _apply_manual_overrides(vendor_name, resolved)
     unresolved_fields = [pid for pid, r in resolved.items() if r.unresolved]
     cross_check_items = find_cross_check_items(resolved)
 
@@ -440,7 +550,7 @@ def _run_review(computed: VendorComputation, client: Optional[FinoscaleClient],
 
     try:
         from vdd.review.graph import DEFAULT_MAX_ITERATIONS, build_review_graph
-        from vdd.review.trace import write_review_trace
+        from vdd.review.trace import summarize_usage, write_review_trace
 
         graph = build_review_graph()
         init_state = {
@@ -454,7 +564,8 @@ def _run_review(computed: VendorComputation, client: Optional[FinoscaleClient],
             "cross_check_items": computed.cross_check_items,
             "iteration": 1,
             "max_iterations": max_review_iterations or DEFAULT_MAX_ITERATIONS,
-            "passes": [], "findings": [], "corrections_applied": [], "escalations": [], "message_traces": [],
+            "passes": [], "findings": [], "corrections_applied": [], "escalations": [],
+            "message_traces": [], "pass_usage": [],
         }
         final_state = graph.invoke(init_state)
         review_trace_path = write_review_trace(computed.vendor_name, out_dir, final_state)
@@ -466,6 +577,7 @@ def _run_review(computed: VendorComputation, client: Optional[FinoscaleClient],
             "corrections_applied": final_state.get("corrections_applied", []),
             "escalations_for_human": final_state.get("escalations", []),
             "review_trace_path": review_trace_path,
+            "token_usage": summarize_usage(final_state.get("pass_usage", [])),
         }
     except Exception as e:
         warnings.append(f"LLM review failed, falling back to the deterministic report: {e}")
@@ -507,4 +619,5 @@ def run_vendor(docs_path: str, out_dir: str, client: Optional[FinoscaleClient] =
         corrections_applied=review_fields.get("corrections_applied", []),
         escalations_for_human=review_fields.get("escalations_for_human", []),
         review_error=review_fields.get("review_error"), review_trace_path=review_fields.get("review_trace_path"),
+        docs=computed.docs, token_usage=review_fields.get("token_usage"),
     )

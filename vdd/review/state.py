@@ -35,3 +35,4 @@ class ReviewState(TypedDict, total=False):
     escalations: Annotated[list[dict], operator.add]
     passes: Annotated[list[dict], operator.add]  # one ReviewReport dict per llm_review call
     message_traces: Annotated[list[list[dict]], operator.add]  # one serialized ReAct message list per pass
+    pass_usage: Annotated[list[dict], operator.add]  # one token-usage summary (trace.extract_pass_usage) per pass

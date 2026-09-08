@@ -1,5 +1,7 @@
 .env
 __pycache__/
 *.pyc
-/out/
-/cache/
+out*/
+cache*/
+*.log
+webapp/uploads/

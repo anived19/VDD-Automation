@@ -54,8 +54,19 @@ def build_review_model() -> Optional[BaseChatModel]:
     provider = select_provider()
     if provider == "gemini":
         model_name = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
+        # include_thoughts=True surfaces Gemini's reasoning summary in the response
+        # content (as "thinking"-type blocks) instead of just the internal, invisible
+        # thinking Gemini 3+ models already do by default -- vdd/review/trace.py's
+        # serializer picks these up and writes them into the review trace file.
+        # thinking_level="high" is also required, verified empirically (2026-09-07):
+        # with include_thoughts=True alone, gemini-3.5-flash-lite still answered with
+        # a plain "text" block (no distinct "thinking" block) -- the general Gemini 3+
+        # docs claim thinking_level defaults to "high", but that did not hold for this
+        # lite model in practice. Setting it explicitly reliably produced a real
+        # "thinking" block with actual chain-of-thought content.
         return init_chat_model(model_name, model_provider="google_genai",
-                                api_key=os.environ["GEMINI_API_KEY"], rate_limiter=_GEMINI_RATE_LIMITER)
+                                api_key=os.environ["GEMINI_API_KEY"], rate_limiter=_GEMINI_RATE_LIMITER,
+                                include_thoughts=True, thinking_level="high")
     if provider == "openai":
         # No guessed default model name here (this codebase's own convention
         # is "never guess, never fabricate") -- OPENAI_MODEL must be set

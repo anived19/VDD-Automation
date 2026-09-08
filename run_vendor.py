@@ -56,6 +56,10 @@ def main():
     if result.reviewed:
         status = "approved by the reviewer" if result.approved else "safety cap reached, not approved"
         print(f"\nLLM review: {result.review_iterations} pass(es), {status}")
+        if result.token_usage:
+            tu = result.token_usage
+            print(f"LLM token usage: {tu['input_tokens']} in + {tu['output_tokens']} out = "
+                  f"{tu['total_tokens']} total across {tu['llm_call_count']} call(s)")
         if result.review_trace_path:
             print(f"Review trace: {result.review_trace_path}")
         if result.corrections_applied:
@@ -80,11 +84,11 @@ def main():
         for item in result.cross_check_items:
             print(f"  - {item}")
     if result.api_errors:
-        print(f"\nAPI errors:")
+        print("\nAPI errors:")
         for e in result.api_errors:
             print(f"  - {e}")
     if result.extraction_warnings:
-        print(f"\nExtraction warnings:")
+        print("\nExtraction warnings:")
         for w in result.extraction_warnings:
             print(f"  - {w}")
 
