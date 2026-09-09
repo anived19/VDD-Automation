@@ -1,0 +1,181 @@
+{
+  "version": "1.0",
+  "reportType": "BASIC_SCORE",
+  "finoscaleId": "FS-BS-2026-00412",
+  "companyName": "MARUTI STEELS",
+  "generatedAt": "2026-08-11T00:00:00.000Z",
+  "status": "DELIVERED",
+
+  "score": {
+    "overall": 40,
+    "maxPossible": 100,
+    "label": "Finoscale Basic Score",
+    "categories": [
+      { "code": "COMPLIANCE",           "label": "Compliance",            "score": 22, "maxScore": 25,   "status": "scored"  },
+      { "code": "PROOF_OF_ADDRESS",     "label": "Proof of Address",      "score": 9,  "maxScore": 10,   "status": "scored"  },
+      { "code": "PROOF_OF_IDENTITY",    "label": "Proof of Identity",     "score": 4,  "maxScore": 10,   "status": "scored"  },
+      { "code": "LEGAL_AML",            "label": "Legal / AML",           "score": 5,  "maxScore": 5,    "status": "scored"  },
+      { "code": "ON_SITE_VERIFICATION", "label": "On-Site Verification",  "score": 0,  "maxScore": 20,   "status": "pending" },
+      { "code": "3B_ANALYSIS",          "label": "3B Analysis",           "score": 0,  "maxScore": 12.5, "status": "pending" },
+      { "code": "2B_ANALYSIS",          "label": "2B Analysis",           "score": 0,  "maxScore": 12.5, "status": "pending" },
+      { "code": "ITR_ANALYSIS",         "label": "ITR Analysis",          "score": 0,  "maxScore": 5,    "status": "pending" }
+    ]
+  },
+
+  "sections": [
+    {
+      "id": "entity_details",
+      "title": "Entity Details",
+      "content": [
+        {
+          "type": "table",
+          "headers": ["Field", "Value"],
+          "rows": [
+            ["Legal Name",        "K N K NATESAN"],
+            ["Trade Name",        "MARUTI STEELS"],
+            ["Entity Type",       "Proprietorship"],
+            ["Year Incorporated", "2017"],
+            ["Business Vintage",  "~9 years on this GSTIN"],
+            ["Location",          "1M, Mahaveer Garden 1st Street, Ambattur, Chennai, Tamil Nadu, 600058"],
+            ["Nature of Business","Wholesale of metal and non-metal waste and scrap (NIC 46699)"]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "registration_compliance_ids",
+      "title": "Registration & Compliance IDs",
+      "content": [
+        {
+          "type": "table",
+          "headers": ["ID Type", "Value", "Status"],
+          "rows": [
+            ["PAN Number",   "ANGPK6122Q",          "Active"],
+            ["GSTIN",        "33ANGPK6122Q1ZR",     "Active"],
+            ["Udyam Reg No", "UDYAM-TN-02-0147312", "Valid & Active"],
+            ["GST Status",   "Active",               "Regular"],
+            ["GST Since",    "01/07/2017",           ""],
+            ["Bank",         "ICICI Bank",           "Verified"]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "business_profile",
+      "title": "Business Profile",
+      "content": [
+        {
+          "type": "paragraph",
+          "text": "MARUTI STEELS is a proprietorship entity engaged in wholesale of metal and non-metal waste and scrap (NIC 46699) — ferrous scrap and cast iron waste (HSN 72041000, 72044900, 72045000). Proprietor: K N K Natesan. The underlying business has operated since 01 January 2007 (~19 years) per Udyam records; GST-registered since 01 July 2017 (~9 years) under GSTIN 33ANGPK6122Q1ZR (Regular, Active, Tamil Nadu) with multi-state GST presence. Active MSME registration UDYAM-TN-02-0147312, consistently classified Small for 5 consecutive years (2022-23 through 2026-27). Registered office: Ambattur, Chennai, Tamil Nadu — 600058."
+        }
+      ]
+    },
+    {
+      "id": "declared_goods_services",
+      "title": "Declared Goods & Services (HSN Codes)",
+      "content": [
+        {
+          "type": "table",
+          "headers": ["HSN / SAC", "Description"],
+          "rows": [
+            ["72041000", "WASTE AND SCRAP OF CAST IRON"],
+            ["72044900", "OTHER"],
+            ["72045000", "REMELTING SCRAP INGOTS"]
+          ]
+        }
+      ]
+    },
+    {
+      "id": "findings_observations",
+      "title": "Findings & Observations",
+      "content": [
+        {
+          "type": "bulletList",
+          "items": [
+            "Active GST registration (01/07/2017), Regular taxpayer status — statutory compliance confirmed",
+            "GST 3B & R1 filings timely — all months filed on time",
+            "Monthly GST filer — higher filing frequency and transparency",
+            "Active registrations across multiple states — multi-state operation",
+            "HSN codes match the declared product category",
+            "Bank penny-drop successful — ICICI Bank verified; GST-linked bank validation unavailable",
+            "No GST filing delay (≤10 days) — satisfactory compliance behaviour",
+            "Business premises owned — confirmed via sale deed",
+            "Electricity bill address matches the GST-registered address",
+            "MSME (Udyam) registration valid & active — UDYAM-TN-02-0147312",
+            "PAN active and name matches GST legal name across sources",
+            "Clean Legal/AML — no sanctions, PEP, wilful-defaulter, eCourt or DRT/SARFAESI records (5/5)"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "compliance_scoring",
+      "title": "Compliance & KYC Scoring Detail",
+      "content": [
+        {
+          "type": "table",
+          "headers": ["Code", "Parameter", "Result"],
+          "rows": [
+            ["COM-01", "GSTIN Active Status",                               "Active"],
+            ["COM-02", "GST Registration Vintage / Age",                    "> 5 years"],
+            ["COM-03", "GST 3B & R1 Filing — Last 12 Months",              "Timely — all months on time"],
+            ["COM-04", "Filing Frequency — Monthly vs Quarterly",           "Monthly filer"],
+            ["COM-05", "Multiple Registrations on Entity PAN",              "Active registrations — multi-state operation"],
+            ["COM-06", "HSN Code Match",                                    "Match — matches declared category"],
+            ["COM-07", "Bank Account Verification — Penny Drop + GST Match","Penny drop successful + GST unavailable"],
+            ["COM-08", "GST Filing Delay Days",                             "No delay / ≤10 days"],
+            ["COM-09", "PF Filing Status — EPFO compliance",                "N/A — Not applicable"],
+            ["POA-01", "Ownership Type",                                    "Owned — confirmed via sale deed"],
+            ["POA-02", "Electricity Bill Match",                            "GST address match — confirmed"],
+            ["POA-03", "Rental Agreement Validation",                       "Owned — full score"],
+            ["POA-04", "MSME Active & Valid",                               "Valid & Active"],
+            ["POA-05", "Landlord Declaration",                              "N/A — Not applicable"],
+            ["POI-01", "PAN Active Status",                                 "Active"],
+            ["POI-02", "Seller Type",                                       "Trader"],
+            ["POI-03", "Legal Constitution",                                "Partnership / Proprietorship / HUF"],
+            ["POI-04", "PAN Name Match with Entity",                        "Match — name matches across both sources"],
+            ["AML-01", "UN / OFAC / EU / India UAPA-NIA Sanctions",        "Not listed — clean"],
+            ["AML-02", "PEP Screening",                                     "No PEP identified — clean"],
+            ["AML-03", "RBI Wilful Defaulter List",                         "Not listed"],
+            ["AML-04", "eCourts",                                           "No criminal cases on record"],
+            ["AML-05", "DRT / SARFAESI",                                    "No DRT cases — clean"],
+            ["OSV-01", "Physical On-Site Verification",                     "Not yet completed — pending scheduling"],
+            ["3B-01",  "GSTR-3B Turnover Analysis",                         "Pending — GST consent not yet granted"],
+            ["2B-01",  "GSTR-2B ITC Analysis",                              "Pending — GST consent not yet granted"],
+            ["ITR-01", "ITR Filing History & Tax Compliance",               "Pending — ITR documents not submitted"]
+          ]
+        }
+      ]
+    }
+  ],
+
+  "narrative": null,
+  "creditRecommendation": null,
+
+  "scopeOfImprovement": [
+    {
+      "area": "ON_SITE_VERIFICATION",
+      "description": "Physical On-Site Verification — premises, stock, and operations have not been physically verified.",
+      "action": "Schedule OSV Visit — coordinate with your Finoscale account manager",
+      "unlockablePoints": 20,
+      "currentScore": 0,
+      "maxScore": 20
+    },
+    {
+      "area": "3B_2B_ANALYSIS",
+      "description": "GST Return Analysis (3B & 2B) — detailed GSTR-3B turnover and GSTR-2B ITC analysis is pending. Requires one-time GST portal consent.",
+      "action": "Grant GST Data Consent — one-time authorisation on the GST portal",
+      "unlockablePoints": 25,
+      "currentScore": 0,
+      "maxScore": 25
+    },
+    {
+      "area": "ITR_ANALYSIS",
+      "description": "ITR & Tax Compliance History — Income Tax Return filing history is not on file.",
+      "action": "Submit ITR Documents — upload last 2 years of ITR acknowledgements",
+      "unlockablePoints": 5,
+      "currentScore": 0,
+      "maxScore": 5
+    }
+  ]
+}

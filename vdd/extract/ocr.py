@@ -10,12 +10,10 @@ Priority order:
      to correct for (confirmed on MVIKAS's cancelled cheque, 2026-09-07 --
      size 899x1599 but the cheque itself is rendered sideways within that
      frame, with `img.getexif()` carrying no orientation tag at all).
-  3. Tesseract, if the binary happens to be installed (soft dependency) --
-     kept as a fast fallback/second opinion, not required.
-  4. A pre-written manual transcript cache, if one exists for this exact
-     file -- last resort now, tried only after both local OCR engines have
+  3. A pre-written manual transcript cache, if one exists for this exact
+     file -- last resort now, tried only after the local OCR engine has
      had a chance, not the primary path.
-  5. Otherwise -> method="unavailable" with empty text. Callers
+  4. Otherwise -> method="unavailable" with empty text. Callers
      (resolvers) must treat this as "needs manual review", never guess.
 
 No document image/bytes are ever sent to any LLM or any third-party API,
@@ -127,7 +125,7 @@ def _get_easyocr_reader():
     if _easyocr_reader is None:
         try:
             import easyocr
-            _easyocr_reader = easyocr.Reader(["en"], gpu=False, verbose=False)
+            _easyocr_reader = easyocr.Reader(["en", "hi", "ta", "te", "kn"], gpu=False, verbose=False)
         except Exception:
             _easyocr_init_failed = True
             return None
@@ -159,27 +157,6 @@ def _easyocr_best_rotation(img) -> tuple[str, float, int]:
         if score > best_score:
             best_score, best_text, best_angle = score, "\n".join(parts), angle
     return best_text, best_score, best_angle
-
-
-def _tesseract_available() -> bool:
-    try:
-        import pytesseract
-        pytesseract.get_tesseract_version()
-        return True
-    except Exception:
-        return False
-
-
-def _ocr_image_tesseract(img) -> str:
-    import pytesseract
-    from PIL import ImageOps
-    # Phone-camera photos sometimes carry an EXIF orientation tag rather than
-    # storing pixels upright; honor it when present (a no-op otherwise -- see
-    # _easyocr_best_rotation for the brute-force fallback when it's absent).
-    img = ImageOps.exif_transpose(img)
-    gray = ImageOps.grayscale(img)
-    bw = gray.point(lambda p: 255 if p > 150 else 0)
-    return pytesseract.image_to_string(bw)
 
 
 # ---------------------------------------------------------------- Visual cancellation-mark check
@@ -273,11 +250,6 @@ def extract_text(path: str, cache_dir: Optional[str] = None) -> ExtractionResult
         best_angle = max(per_page, key=lambda r: r[1])[2] if per_page else 0
         if easy_score > 0 and len(easy_text.strip()) > 20:
             return ExtractionResult(text=easy_text, method="easyocr", confident=True, rotation=best_angle)
-
-        if _tesseract_available():
-            text = "\n".join(_ocr_image_tesseract(im) for im in images)
-            if len(text.strip()) > 20:
-                return ExtractionResult(text=text, method="tesseract", confident=True)
 
     manual = _manual_transcript(path, cache_dir)
     if manual:

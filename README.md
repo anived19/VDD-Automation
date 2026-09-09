@@ -83,9 +83,7 @@ python run_vendor.py --docs "..." --scoring-model config/scoring_model.json --ca
 ```
 
 `--cache-dir` (default `cache/`) caches both Finoscale API responses and OCR
-output across runs. The optional OCR fallback (`vdd/extract/ocr.py`) degrades
-gracefully when unavailable: Tesseract needs the binary on `PATH`
-(`pytesseract`). No document image/bytes are ever sent to any LLM — there is
+output across runs. No document image/bytes are ever sent to any LLM — there is
 deliberately no vision-based OCR fallback tier.
 
 ## LLM review loop
