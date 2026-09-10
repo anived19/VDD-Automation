@@ -68,7 +68,7 @@ CONTENT_SIGNATURES: List[tuple] = [
     ("aadhaar", ["unique identification authority", ("aadhaar", "government of india")]),
     ("pan_entity", [("income tax department", "permanent account number"),
                     ("permanent account number", r"\b[a-z]{5}\d{4}[a-z]\b")]),
-    ("electricity_bill", ["electricity bill", "vidyut vitran", "विद्युत वितरण", "वीज बिल", ("sanctioned load", "billed demand"),
+    ("electricity_bill", ["electricity bill", "vidyut vitran", "विद्युत वितरण", "वीज बिल", "बिजली बिल", "ವಿದ್ಯುತ್ ಬಿಲ್", "ಬೆಸ್ಕಾಂ", "విద్యుత్ బిల్లు", "மின் கட்டண ரசீது", ("sanctioned load", "billed demand"),
                            ("kwh", "meter number"), ("kwh", "sanctioned load")]),
     ("trade_licence", ["shops and commercial establishment", "registration certificate of shop",
                         "trade licence", "trade license"]),

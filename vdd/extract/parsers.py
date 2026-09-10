@@ -211,10 +211,10 @@ def parse_electricity_bill(text: str) -> dict:
     label vocabulary hardcoded.
     """
     out = {}
-    m = re.search(r'Consumer Name\s*[:\-]?\s*(.+)', text)
+    m = re.search(r'(?:Consumer Name|ग्राहकाचे नाव|उपभोक्ता का नाम|ಗ್ರಾಹಕರ ಹೆಸರು|వినియోగదారు పేరు|நுகர்வோர் பெயர்)\s*[:\-]?\s*(.+)', text, re.I)
     if m:
         out["consumer_name"] = m.group(1).strip()
-    m = re.search(r'Address\s*:\s*\n?\s*(.+?)(?:\n\s*(?:Village|Pin Code|Category)|\Z)', text, re.S)
+    m = re.search(r'(?:Address|पत्ता|पता|ವಿಳಾಸ|చిరునామా|முகவரி)\s*[:\-]?\s*\n?\s*(.+?)(?:\n\s*(?:Village|Pin Code|Category|गाव|पिन कोड|प्रवर्ग|गांव|ಗ್ರಾಮ|ವರ್ಗ|వర్గం|வகை)|\Z)', text, re.S | re.I)
     if m:
         addr_lines = [l.strip() for l in m.group(1).splitlines() if l.strip()]
         out["address"] = ", ".join(addr_lines)
@@ -225,25 +225,25 @@ def parse_electricity_bill(text: str) -> dict:
         if m:
             out["consumer_name"] = m.group(1).strip()
             out["address"] = re.sub(r'\s+', ' ', m.group(2)).strip()
-    m = re.search(r'Pin Code\s*[:\-]?\s*(\d{6})', text)
+    m = re.search(r'(?:Pin Code|पिन कोड|ಪಿನ್ ಕೋಡ್|పిన్ కోడ్|அஞ்சல் குறியீடு)\s*[:\-]?\s*(\d{6})', text, re.I)
     if m:
         out["pincode"] = m.group(1)
-    m = re.search(r'Category\s*[:\-]?\s*(\w+)', text)
+    m = re.search(r'(?:Category|प्रवर्ग|श्रेणी|ವರ್ಗ|వర్గం|வகை)\s*[:\-]?\s*(\w+)', text, re.I)
     if m:
         out["category"] = m.group(1)
     # The declared connection activity is an independent, utility-issued statement
     # of what happens at the premises -- the strongest available cross-check on the
     # Udyam NIC code, and the corroboration the reference report cites explicitly.
-    m = re.search(r'Activity\s*[:\-]?\s*(.+)', text)
+    m = re.search(r'(?:Activity|वापर|उपयोग|ಬಳಕೆ|వినియోగం|பயன்பாடு)\s*[:\-]?\s*(.+)', text, re.I)
     if m:
         out["activity"] = m.group(1).strip()
-    m = re.search(r'Village\s*[:\-]?\s*([A-Za-z .]+)', text)
+    m = re.search(r'(?:Village|गाव|गांव|ಗ್ರಾಮ|గ్రామం|கிராமம்)\s*[:\-]?\s*([A-Za-z .]+)', text, re.I)
     if m:
         out["village"] = m.group(1).strip()
-    m = re.search(r'Date of Connection\s*[:\-]?\s*(\d{2}/\d{2}/\d{4})', text)
+    m = re.search(r'(?:Date of Connection|जोडणीची तारीख|कनेक्शन की तिथि|ಸಂಪರ್ಕ ದಿನಾಂಕ|కనెక్షన్ తేదీ|இணைப்பு தேதி)\s*[:\-]?\s*(\d{2}/\d{2}/\d{4})', text, re.I)
     if m:
         out["date_of_connection"] = m.group(1)
-    m = re.search(r'Sanctioned Load\s*[:\-]?\s*([\d.]+\s*\w+)', text)
+    m = re.search(r'(?:Sanctioned Load|मंजूर भार|मंजूर वीजभार|स्वीकृत भार|ಮಂಜೂರಾದ ಲೋಡ್|మంజూరైన లోడ్|அனுமதிக்கப்பட்ட சுமை)\s*[:\-]?\s*([\d.]+\s*\w+)', text, re.I)
     if m:
         out["sanctioned_load"] = m.group(1).strip()
     return out
