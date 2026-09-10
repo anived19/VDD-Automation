@@ -92,8 +92,9 @@ documents without script collisions.
 
 ## LLM review loop
 
-`vdd/review/` (LangGraph) runs automatically whenever `GEMINI_API_KEY` (or
-`OPENAI_API_KEY`, see below) is set and `--no-review` wasn't passed — it
+`vdd/review/` (LangGraph) runs automatically whenever `GEMINI_API_KEY`,
+`QWEN_BASE_URL`, or `OPENAI_API_KEY` (see below) is set and `--no-review`
+wasn't passed — it
 degrades to a clear console note and the deterministic-only report
 otherwise, the same graceful-degrade idiom used everywhere else in this
 pipeline. It reads the rendered report plus the resolved parameter values
@@ -110,10 +111,13 @@ findings, tool calls, and corrections are written to a local
 `<VENDOR>_review_trace.json` file next to the report — never transmitted
 anywhere.
 
-**Provider**: Gemini (`gemini-3.5-flash-lite`) is the tested path. Set
-`OPENAI_API_KEY` (and `OPENAI_MODEL`) instead to swap providers — see
+**Provider**: Gemini (`gemini-3.5-flash-lite`) is the tested hosted path.
+Set `OPENAI_API_KEY` (and `OPENAI_MODEL`) to swap to OpenAI instead — see
 `vdd/review/model.py` — but that path is untested; no OpenAI key was
-available while building it.
+available while building it. To use a self-hosted model instead of a
+hosted API, set `QWEN_BASE_URL` (and optionally `QWEN_MODEL`) to point at
+an OpenAI-compatible server such as vLLM serving Qwen3.8-27B — see
+`.env.example`.
 
 **Tracing must stay off.** This pipeline handles consented but highly
 sensitive personal financial/KYC data — LangChain/LangSmith tracing must

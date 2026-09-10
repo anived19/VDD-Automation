@@ -528,7 +528,7 @@ def _run_review(computed: VendorComputation, client: Optional[FinoscaleClient],
                  scoring_model_path: str, out_dir: str, max_review_iterations: Optional[int],
                  warnings: List[str]) -> dict:
     """Runs the LLM review graph and returns a dict of VendorRunResult fields
-    to merge in. Never raises -- any failure (missing key, Gemini/OpenAI
+    to merge in. Never raises -- any failure (missing key, Gemini/Qwen/OpenAI
     outage, a tool crashing, a malformed structured response, ...) is caught
     here and degrades to the deterministic-only report, exactly like every
     other external call in this pipeline (fetch_api_data's per-call
@@ -545,7 +545,7 @@ def _run_review(computed: VendorComputation, client: Optional[FinoscaleClient],
         return {"context": computed.context}
 
     if provider is None:
-        warnings.append("LLM review skipped -- no GEMINI_API_KEY/OPENAI_API_KEY configured.")
+        warnings.append("LLM review skipped -- no GEMINI_API_KEY/QWEN_BASE_URL/OPENAI_API_KEY configured.")
         return {"context": computed.context}
 
     try:

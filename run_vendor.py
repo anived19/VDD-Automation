@@ -26,7 +26,7 @@ def main():
     ap.add_argument("--no-api", action="store_true", help="Skip Finoscale Data API calls (doc extraction only)")
     ap.add_argument("--cache-dir", default="cache", help="Directory to cache API responses (default: cache/)")
     ap.add_argument("--no-review", action="store_true",
-                     help="Skip the LLM review loop regardless of GEMINI_API_KEY/OPENAI_API_KEY -- deterministic-only report")
+                     help="Skip the LLM review loop regardless of GEMINI_API_KEY/QWEN_BASE_URL/OPENAI_API_KEY -- deterministic-only report")
     ap.add_argument("--max-review-iterations", type=int, default=None,
                      help="Safety cap on review passes (default: vdd.review.graph.DEFAULT_MAX_ITERATIONS)")
     args = ap.parse_args()

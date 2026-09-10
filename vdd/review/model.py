@@ -38,12 +38,16 @@ def select_provider() -> Optional[str]:
     explicit = os.environ.get("LLM_PROVIDER", "").strip().lower()
     if explicit in ("gemini", "google", "google_genai"):
         return "gemini" if os.environ.get("GEMINI_API_KEY") else None
+    if explicit in ("qwen", "local", "vllm"):
+        return "qwen" if os.environ.get("QWEN_BASE_URL") else None
     if explicit == "openai":
         return "openai" if os.environ.get("OPENAI_API_KEY") else None
     if explicit:
-        raise ValueError(f"Unrecognized LLM_PROVIDER={explicit!r} -- expected 'gemini' or 'openai'")
+        raise ValueError(f"Unrecognized LLM_PROVIDER={explicit!r} -- expected 'gemini', 'qwen', or 'openai'")
     if os.environ.get("GEMINI_API_KEY"):
         return "gemini"
+    if os.environ.get("QWEN_BASE_URL"):
+        return "qwen"
     if os.environ.get("OPENAI_API_KEY"):
         return "openai"
     return None
@@ -67,6 +71,21 @@ def build_review_model() -> Optional[BaseChatModel]:
         return init_chat_model(model_name, model_provider="google_genai",
                                 api_key=os.environ["GEMINI_API_KEY"], rate_limiter=_GEMINI_RATE_LIMITER,
                                 include_thoughts=True, thinking_level="high")
+    if provider == "qwen":
+        # Self-hosted Qwen3.8-27B behind vLLM's OpenAI-compatible server
+        # (see .env.example). QWEN_MODEL must match exactly what was passed
+        # to `vllm serve` (or its --served-model-name alias) -- vLLM
+        # validates the model field against that, not against any real
+        # model registry.
+        model_name = os.environ.get("QWEN_MODEL", "Qwen/Qwen3.8-27B")
+        return init_chat_model(model_name, model_provider="openai",
+                                api_key=os.environ.get("QWEN_API_KEY", "EMPTY"),
+                                base_url=os.environ["QWEN_BASE_URL"],
+                                # Qwen3.8 thinks by default and its own docs suggest very
+                                # large output budgets (262K reasoning / 131K final) --
+                                # both unrealistic for a resource-constrained local server,
+                                # so cap it explicitly rather than inherit that default.
+                                max_tokens=2048)
     if provider == "openai":
         # No guessed default model name here (this codebase's own convention
         # is "never guess, never fabricate") -- OPENAI_MODEL must be set
