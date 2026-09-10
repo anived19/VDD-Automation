@@ -111,51 +111,89 @@ def _pdf_to_images(path: str, dpi: int = 150):
 
 
 # ---------------------------------------------------------------- EasyOCR (local, primary)
-_easyocr_reader = None
-_easyocr_init_failed = False
+_easyocr_readers = {}
+_easyocr_missing = False
 
 
-def _get_easyocr_reader():
-    """Lazily initialize one shared EasyOCR reader per process -- model load
-    takes a few seconds, not worth repeating per document. gpu=False since
-    this is a CPU dev machine; correctness matters far more than speed here."""
-    global _easyocr_reader, _easyocr_init_failed
-    if _easyocr_init_failed:
+def _get_easyocr_reader(langs: list[str]):
+    """Lazily initialize one shared EasyOCR reader per script family.
+    gpu=False since this is a CPU dev machine; correctness matters far more
+    than speed here."""
+    global _easyocr_readers, _easyocr_missing
+    if _easyocr_missing:
         return None
-    if _easyocr_reader is None:
-        try:
-            import easyocr
-            _easyocr_reader = easyocr.Reader(["en", "hi", "mr"], gpu=False, verbose=False)
-        except Exception:
-            _easyocr_init_failed = True
-            return None
-    return _easyocr_reader
+        
+    lang_key = tuple(langs)
+    if lang_key in _easyocr_readers:
+        return _easyocr_readers[lang_key]
+        
+    try:
+        import easyocr
+    except ImportError:
+        _easyocr_missing = True
+        return None
+        
+    try:
+        reader = easyocr.Reader(langs, gpu=False, verbose=False)
+        _easyocr_readers[lang_key] = reader
+        return reader
+    except Exception:
+        _easyocr_readers[lang_key] = None
+        return None
 
 
 def _easyocr_best_rotation(img) -> tuple[str, float, int]:
     """Try all 4 orientations and keep whichever one the model reads
     confidently, rather than trusting EXIF (frequently absent -- see module
-    docstring) or filename hints (frequently useless). Scored by total
-    characters recognized at >=0.4 confidence: in practice a wrong
-    orientation reliably scores near zero, not a partial/ambiguous amount,
-    so this cleanly picks out the real orientation without needing a
-    separate rotation-detection model. Returns (text, score, angle) -- the
-    angle is needed by any other image-level check on this same file (see
-    detect_diagonal_strike), not just for text extraction."""
-    reader = _get_easyocr_reader()
-    if reader is None:
+    docstring) or filename hints (frequently useless). 
+    
+    Uses Dynamic State Detection: First, a fast English-only pass checks all 4
+    rotations. If it finds state-specific keywords (like 'Karnataka' or 'BESCOM'),
+    it dynamically loads the appropriate regional PyTorch model and runs a single,
+    targeted pass at the correct orientation. This handles pan-India documents 
+    without crashing due to incompatible script constraints or destroying CPU performance."""
+    en_reader = _get_easyocr_reader(["en"])
+    if en_reader is None:
         return "", 0.0, 0
+        
     import numpy as np
     from PIL import ImageOps
     img = ImageOps.exif_transpose(img).convert("RGB")
+    
+    # 1. Fast English-only brute-force rotation check
     best_text, best_score, best_angle = "", 0.0, 0
     for angle in (0, 90, 180, 270):
         rotated = img.rotate(angle, expand=True) if angle else img
-        results = reader.readtext(np.array(rotated), detail=1)
+        results = en_reader.readtext(np.array(rotated), detail=1)
         parts = [t for (_bbox, t, conf) in results if conf >= 0.4]
         score = sum(len(t) for t in parts)
         if score > best_score:
             best_score, best_text, best_angle = score, "\n".join(parts), angle
+
+    if not best_text:
+        return "", 0.0, 0
+
+    # 2. Dynamic State Detection
+    t = best_text.lower()
+    if "karnataka" in t or "bescom" in t or "hescom" in t or "bangalore" in t or "bengaluru" in t:
+        regional_langs = ["en", "kn"]
+    elif "tamil nadu" in t or "tangedco" in t or "chennai" in t:
+        regional_langs = ["en", "ta"]
+    elif "telangana" in t or "andhra" in t or "hyderabad" in t or "transco" in t:
+        regional_langs = ["en", "te"]
+    else:
+        # Default to Devanagari (Hindi, Marathi, etc.)
+        regional_langs = ["en", "hi", "mr"]
+        
+    # 3. Regional deep-pass at the known correct angle
+    regional_reader = _get_easyocr_reader(regional_langs)
+    if regional_reader:
+        rotated = img.rotate(best_angle, expand=True) if best_angle else img
+        results = regional_reader.readtext(np.array(rotated), detail=1)
+        parts = [txt for (_bbox, txt, conf) in results if conf >= 0.4]
+        best_text = "\n".join(parts)
+        best_score = sum(len(txt) for txt in parts)
+        
     return best_text, best_score, best_angle
 
 
