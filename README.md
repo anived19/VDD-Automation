@@ -84,7 +84,11 @@ python run_vendor.py --docs "..." --scoring-model config/scoring_model.json --ca
 
 `--cache-dir` (default `cache/`) caches both Finoscale API responses and OCR
 output across runs. No document image/bytes are ever sent to any LLM — there is
-deliberately no vision-based OCR fallback tier.
+deliberately no vision-based OCR fallback tier. Instead, the pipeline uses
+local EasyOCR with **Dynamic State Detection** to dynamically switch between
+English, Devanagari (Hindi/Marathi), Kannada, Tamil, and Telugu models based on
+the document's geographic origin, allowing it to natively read bilingual regional
+documents without script collisions.
 
 ## LLM review loop
 

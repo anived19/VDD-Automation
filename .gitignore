@@ -5,3 +5,14 @@ out*/
 cache*/
 *.log
 webapp/uploads/
+
+# Test data & scratch files
+*_out.txt
+*-basic-score.json
+Arpitha Industries/
+test folders/
+
+# References & IDEs
+_ref/
+.vscode/
+.pytest_cache/

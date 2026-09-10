@@ -1,6 +1,0 @@
-{
-    "python.defaultInterpreterPath": "C:\\Python313\\python.exe",
-    "python.terminal.activateEnvironment": false,
-    "python.testing.pytestEnabled": true,
-    "python.testing.pytestArgs": ["tests"]
-}
