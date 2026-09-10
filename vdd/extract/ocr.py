@@ -125,7 +125,7 @@ def _get_easyocr_reader():
     if _easyocr_reader is None:
         try:
             import easyocr
-            _easyocr_reader = easyocr.Reader(["en", "hi", "ta", "te", "kn"], gpu=False, verbose=False)
+            _easyocr_reader = easyocr.Reader(["en", "hi", "mr"], gpu=False, verbose=False)
         except Exception:
             _easyocr_init_failed = True
             return None

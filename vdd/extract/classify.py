@@ -18,7 +18,7 @@ DOC_TYPE_PATTERNS: Dict[str, List[str]] = {
     "pan_entity": [r"entity[\s_-]*pan", r"company[\s_-]*pan", r"\bpan\s*card\b"],
     "msme_certificate": [r"\bmsme\b", r"\budyam\b"],
     "kyc_form": [r"\bkyc\b"],
-    "electricity_bill": [r"electricity", r"e[\s_-]*bill"],
+    "electricity_bill": [r"electricity", r"electric[\s_-]*bill", r"e[\s_-]*bill"],
     # Ownership / occupancy proof. Classified ahead of rental_agreement below so a
     # "Proof of Premises - Sale Deed.pdf" isn't mistaken for a tenancy document.
     "sale_deed": [r"sale[\s_-]*deed", r"property[\s_-]*tax", r"index[\s_-]*ii", r"7\s*/\s*12\s*extract"],
@@ -68,7 +68,7 @@ CONTENT_SIGNATURES: List[tuple] = [
     ("aadhaar", ["unique identification authority", ("aadhaar", "government of india")]),
     ("pan_entity", [("income tax department", "permanent account number"),
                     ("permanent account number", r"\b[a-z]{5}\d{4}[a-z]\b")]),
-    ("electricity_bill", ["electricity bill", "vidyut vitran", ("sanctioned load", "billed demand"),
+    ("electricity_bill", ["electricity bill", "vidyut vitran", "विद्युत वितरण", "वीज बिल", ("sanctioned load", "billed demand"),
                            ("kwh", "meter number"), ("kwh", "sanctioned load")]),
     ("trade_licence", ["shops and commercial establishment", "registration certificate of shop",
                         "trade licence", "trade license"]),
