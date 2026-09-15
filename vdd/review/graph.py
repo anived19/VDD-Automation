@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,13 @@ from vdd.review.trace import extract_pass_usage, serialize_messages
 from vdd.score.engine import ScoringEngine
 
 logger = logging.getLogger(__name__)
+
+
+def _strip_head(html: str) -> str:
+    """Drop the <head>...</head> block (~3.5k+ tokens of inline CSS/meta)
+    before the report goes to the reviewer -- it reasons over the data,
+    never the styling."""
+    return re.sub(r"<head\b[^>]*>.*?</head>", "", html, count=1, flags=re.DOTALL | re.IGNORECASE)
 
 _SYSTEM_PROMPT = (Path(__file__).parent / "prompts" / "reviewer.md").read_text(encoding="utf-8")
 
@@ -84,7 +92,7 @@ def _build_user_message(state: ReviewState) -> str:
         "\n".join(f"- {i}" for i in state.get("cross_check_items", [])) or "(none)",
         "",
         "## Rendered report (HTML)",
-        state.get("html", ""),
+        _strip_head(state.get("html", "")),
     ]
     if iteration > 1:
         parts += ["", "## History of previous passes", _format_history(state.get("passes", []))]
