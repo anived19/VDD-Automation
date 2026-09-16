@@ -64,7 +64,8 @@ def main():
         print(f"\nLLM review: {result.review_iterations} pass(es), {status}")
         if result.token_usage:
             tu = result.token_usage
-            print(f"LLM token usage: {tu['input_tokens']} in + {tu['output_tokens']} out = "
+            reasoning = f" (of which {tu['reasoning_tokens']} reasoning)" if tu.get("reasoning_tokens") else ""
+            print(f"LLM token usage: {tu['input_tokens']} in + {tu['output_tokens']} out{reasoning} = "
                   f"{tu['total_tokens']} total across {tu['llm_call_count']} call(s)")
         if result.review_trace_path:
             print(f"Review trace: {result.review_trace_path}")

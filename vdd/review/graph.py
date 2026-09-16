@@ -44,7 +44,7 @@ from langgraph.graph.state import CompiledStateGraph
 from vdd.report.build_context import build_context
 from vdd.report.render import build_text
 from vdd.resolve.resolvers import Resolved
-from vdd.review.model import build_review_model, select_provider
+from vdd.review.model import build_review_model, qwen_thinking_enabled, qwen_thinking_max_tokens, select_provider
 from vdd.review.schemas import ReviewReport
 from vdd.review.state import ReviewState
 from vdd.review.tools import make_tools
@@ -65,6 +65,16 @@ QWEN_MAX_MODEL_LEN_FALLBACK = int(os.environ.get("QWEN_MAX_MODEL_LEN", "32768"))
 # This is a per-TURN cap, and every turn's output stays in the context for the
 # rest of the pass, so it is also the single biggest lever on mid-pass growth.
 QWEN_MAX_OUTPUT_TOKENS = 2048
+# QWEN_THINKING=1: the <think> block is decoded before the tool call / JSON and
+# counts against the same per-turn cap (model.py::qwen_thinking_max_tokens; 0 =
+# uncapped). Unlike visible output, reasoning is NOT re-sent on later turns
+# (langchain_openai drops it -- verified against 1.6.x's
+# _convert_message_to_dict), so it costs per-turn max_tokens headroom but not
+# per-round-trip context growth.
+QWEN_VISIBLE_OUTPUT_TOKENS_THINKING = 1024   # tool call + any content that DOES persist
+# When uncapped there is no max_tokens to reserve against; this stands in for
+# the final ReviewReport turn's expected size in the call-budget arithmetic.
+QWEN_UNCAPPED_RESERVE = 6144
 # The invariant the server enforces on EVERY turn, not just the first:
 #     prompt_so_far + max_tokens <= max_model_len
 # A pass that fit its first call at 7k tokens still died at >=28.7k after the
@@ -107,7 +117,7 @@ def _qwen_count_tokens(messages: list[dict], tools: list[dict]) -> Optional[tupl
     url = (base[:-3] if base.endswith("/v1") else base) + "/tokenize"
     body = {"model": os.environ.get("QWEN_MODEL", "Qwen/Qwen3.8-27B"), "messages": messages,
             "tools": tools, "add_generation_prompt": True,
-            "chat_template_kwargs": {"enable_thinking": False}}
+            "chat_template_kwargs": {"enable_thinking": qwen_thinking_enabled()}}
     try:
         r = requests.post(url, json=body, timeout=30)
         r.raise_for_status()
@@ -135,9 +145,16 @@ def _qwen_budget(user_msg: str, tools: list) -> tuple[int, int]:
         max_model_len = QWEN_MAX_MODEL_LEN_FALLBACK
         how = "estimated"
 
-    max_tokens = QWEN_MAX_OUTPUT_TOKENS
-    headroom = max_model_len - prompt_tokens - max_tokens
-    per_round_trip = max_tokens + QWEN_TOOL_RESULT_TOKENS
+    thinking = qwen_thinking_enabled()
+    if thinking:
+        max_tokens = qwen_thinking_max_tokens()          # 0 = uncapped
+        reserve = max_tokens or QWEN_UNCAPPED_RESERVE
+        per_round_trip = QWEN_VISIBLE_OUTPUT_TOKENS_THINKING + QWEN_TOOL_RESULT_TOKENS
+    else:
+        max_tokens = QWEN_MAX_OUTPUT_TOKENS
+        reserve = max_tokens
+        per_round_trip = max_tokens + QWEN_TOOL_RESULT_TOKENS
+    headroom = max_model_len - prompt_tokens - reserve
     calls = max(QWEN_MIN_MODEL_CALLS, min(QWEN_MAX_MODEL_CALLS, headroom // per_round_trip))
     if headroom < per_round_trip * QWEN_MIN_MODEL_CALLS:
         logger.warning(
@@ -146,9 +163,10 @@ def _qwen_budget(user_msg: str, tools: list) -> tuple[int, int]:
             "--max-model-len on the vLLM server.", prompt_tokens, how, max_model_len, headroom,
             per_round_trip * QWEN_MIN_MODEL_CALLS)
     else:
-        logger.info("Qwen review: prompt %d tokens (%s), max_model_len %d, max_tokens %d/turn, "
+        logger.info("Qwen review: prompt %d tokens (%s), max_model_len %d, thinking %s, max_tokens %s/turn, "
                     "%d tokens of headroom -> at most %d model calls this pass.",
-                    prompt_tokens, how, max_model_len, max_tokens, headroom, calls)
+                    prompt_tokens, how, max_model_len, "ON" if thinking else "off",
+                    max_tokens or "uncapped (rest of window)", headroom, calls)
     return max_tokens, calls
 
 

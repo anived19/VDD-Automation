@@ -67,30 +67,38 @@ def _usage_from_message(m: Any) -> Optional[dict[str, int]]:
     u = getattr(m, "usage_metadata", None)
     if not u:
         return None
+    # Providers that expose reasoning (vLLM's completion_tokens_details.reasoning_tokens,
+    # Gemini's thoughts) land here via langchain's output_token_details -- the only
+    # trace of QWEN_THINKING=1 that survives, since the reasoning text itself is
+    # dropped by langchain_openai (see model.py::qwen_thinking_enabled).
+    details = u.get("output_token_details") or {}
     return {"input_tokens": int(u.get("input_tokens") or 0),
             "output_tokens": int(u.get("output_tokens") or 0),
-            "total_tokens": int(u.get("total_tokens") or 0)}
+            "total_tokens": int(u.get("total_tokens") or 0),
+            "reasoning_tokens": int(details.get("reasoning") or 0)}
+
+
+_USAGE_KEYS = ("input_tokens", "output_tokens", "total_tokens", "reasoning_tokens")
 
 
 def extract_pass_usage(messages: list[Any]) -> dict[str, int]:
     """Sum token usage across every LLM call made during one llm_review pass --
     a ReAct pass invokes the model once per tool-calling round, not just once,
     so this sums usage_metadata across every AIMessage in that pass."""
-    totals = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "llm_call_count": 0}
+    totals = {k: 0 for k in _USAGE_KEYS} | {"llm_call_count": 0}
     for m in messages:
         u = _usage_from_message(m)
         if u is None:
             continue
-        totals["input_tokens"] += u["input_tokens"]
-        totals["output_tokens"] += u["output_tokens"]
-        totals["total_tokens"] += u["total_tokens"]
+        for k in _USAGE_KEYS:
+            totals[k] += u[k]
         totals["llm_call_count"] += 1
     return totals
 
 
 def summarize_usage(pass_usage: list[dict[str, int]]) -> dict[str, int]:
     """Grand total across every pass of one review run."""
-    totals = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "llm_call_count": 0}
+    totals = {k: 0 for k in _USAGE_KEYS} | {"llm_call_count": 0}
     for p in pass_usage:
         for k in totals:
             totals[k] += p.get(k, 0)

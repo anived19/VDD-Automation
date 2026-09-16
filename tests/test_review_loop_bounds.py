@@ -91,11 +91,35 @@ def qwen_env(monkeypatch):
         severity="clean", source_url=None))
 
 
-def test_budget_derives_model_call_limit_from_measured_headroom(qwen_env):
+def test_budget_derives_model_call_limit_from_measured_headroom(qwen_env, monkeypatch):
+    monkeypatch.delenv("QWEN_THINKING", raising=False)
     max_tokens, calls = graph._qwen_budget("user msg", [])
     assert max_tokens == graph.QWEN_MAX_OUTPUT_TOKENS
     # (32768 - 7000 - 2048) // (2048 + 2000) == 5
     assert calls == 5
+
+
+def test_thinking_mode_raises_turn_cap_but_not_context_growth(qwen_env, monkeypatch):
+    monkeypatch.setenv("QWEN_THINKING", "1")
+    monkeypatch.delenv("QWEN_THINKING_MAX_TOKENS", raising=False)
+    max_tokens, calls = graph._qwen_budget("user msg", [])
+    assert max_tokens == 8192
+    # reasoning never re-enters the prompt, so a round trip only grows the context by
+    # the visible output + one tool result: (32768 - 7000 - 8192) // (1024 + 2000) == 5
+    assert calls == 5
+
+
+def test_thinking_uncapped_sends_no_max_tokens(qwen_env, monkeypatch):
+    monkeypatch.setenv("QWEN_THINKING", "1")
+    monkeypatch.setenv("QWEN_THINKING_MAX_TOKENS", "0")
+    monkeypatch.setenv("QWEN_BASE_URL", "http://127.0.0.1:9/v1")
+    max_tokens, calls = graph._qwen_budget("user msg", [])
+    assert max_tokens == 0
+    assert calls == 6  # (32768 - 7000 - 6144 reserve) // 3024
+    from vdd.review.model import build_review_model
+    m = build_review_model(qwen_max_tokens=max_tokens)
+    assert m.max_tokens is None  # omitted -> vLLM sizes it to the rest of the window
+    assert m.extra_body["chat_template_kwargs"] == {"enable_thinking": True}
 
 
 def test_tool_happy_model_is_forced_to_submit_a_report(qwen_env, monkeypatch, tmp_path):

@@ -53,12 +53,39 @@ def select_provider() -> Optional[str]:
     return None
 
 
+def qwen_thinking_enabled() -> bool:
+    """QWEN_THINKING=1 turns Qwen3.8's <think> reasoning on for the reviewer.
+    Off by default: it multiplies GPU time per turn (every reasoning token is
+    decoded at T4 speed) but costs nothing in context -- langchain_openai never
+    sends reasoning back on later turns, and vLLM's --reasoning-parser keeps it
+    out of `content`. It also can't be read back: langchain_openai 1.6 drops
+    the `reasoning` field in chat-completions mode, so the trace records only
+    the reasoning TOKEN COUNT per call (trace.py), not the text."""
+    return os.environ.get("QWEN_THINKING", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+QWEN_THINKING_MAX_TOKENS_DEFAULT = 8192
+
+
+def qwen_thinking_max_tokens() -> int:
+    """Per-turn cap while thinking (reasoning + tool call / JSON together).
+    QWEN_THINKING_MAX_TOKENS overrides; 0 means UNCAPPED -- max_tokens is not
+    sent and vLLM lets the turn run to whatever is left of the window. Safe
+    against context-length rejections (vLLM sizes it per request) but a
+    runaway think on T4s can take an hour, so the default stays finite.
+    For scale: Gemini with thinking_level="high" spends ~0.6-1.3k output
+    tokens per turn on this task (out/*_review_trace.json totals / calls)."""
+    raw = os.environ.get("QWEN_THINKING_MAX_TOKENS", "").strip()
+    return int(raw) if raw else QWEN_THINKING_MAX_TOKENS_DEFAULT
+
+
 def build_review_model(*, qwen_max_tokens: Optional[int] = None) -> Optional[BaseChatModel]:
     """Returns None if no usable LLM key is configured.
 
     `qwen_max_tokens` overrides the qwen branch's output-token cap -- see
     vdd/review/graph.py::llm_review, which sizes it against that call's
-    actual prompt length before invoking this. Ignored for every other
+    actual prompt length before invoking this. 0 means send no cap at all
+    (vLLM then allows the rest of the window). Ignored for every other
     provider."""
     provider = select_provider()
     if provider == "gemini":
@@ -83,18 +110,20 @@ def build_review_model(*, qwen_max_tokens: Optional[int] = None) -> Optional[Bas
         # validates the model field against that, not against any real
         # model registry.
         model_name = os.environ.get("QWEN_MODEL", "Qwen/Qwen3.8-27B")
-        # Thinking is disabled: Qwen3.8's <think>…</think> tokens would count against
-        # max_tokens before the JSON starts, and the structured ReviewReport doesn't
-        # benefit from them. With thinking off the output IS the JSON, and real
-        # passes run ~0.6-1k tokens. The caller (graph.py::_qwen_budget) owns the
-        # cap because it is a per-turn cap that also bounds mid-pass context
-        # growth; the server rejects prompt_tokens + max_tokens > --max-model-len
-        # on every turn. The default here is only for callers that don't pass one.
+        # Qwen3.8's <think>…</think> tokens count against max_tokens BEFORE the
+        # JSON starts, so the per-turn cap depends on whether thinking is on (see
+        # qwen_thinking_enabled). The caller (graph.py::_qwen_budget) owns the cap
+        # because it is a per-turn cap that also bounds mid-pass context growth;
+        # the server rejects prompt_tokens + max_tokens > --max-model-len on every
+        # turn. The defaults here are only for callers that don't pass one.
+        thinking = qwen_thinking_enabled()
+        if qwen_max_tokens is None:
+            qwen_max_tokens = qwen_thinking_max_tokens() if thinking else 2048
         return init_chat_model(model_name, model_provider="openai",
                                 api_key=os.environ.get("QWEN_API_KEY", "EMPTY"),
                                 base_url=os.environ["QWEN_BASE_URL"],
-                                max_tokens=qwen_max_tokens if qwen_max_tokens is not None else 2048,
-                                extra_body={"chat_template_kwargs": {"enable_thinking": False}})
+                                max_tokens=qwen_max_tokens or None,  # 0 -> omit, vLLM fills the window
+                                extra_body={"chat_template_kwargs": {"enable_thinking": thinking}})
     if provider == "openai":
         # No guessed default model name here (this codebase's own convention
         # is "never guess, never fabricate") -- OPENAI_MODEL must be set
