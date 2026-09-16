@@ -53,8 +53,13 @@ def select_provider() -> Optional[str]:
     return None
 
 
-def build_review_model() -> Optional[BaseChatModel]:
-    """Returns None if no usable LLM key is configured."""
+def build_review_model(*, qwen_max_tokens: Optional[int] = None) -> Optional[BaseChatModel]:
+    """Returns None if no usable LLM key is configured.
+
+    `qwen_max_tokens` overrides the qwen branch's output-token cap -- see
+    vdd/review/graph.py::llm_review, which sizes it against that call's
+    actual prompt length before invoking this. Ignored for every other
+    provider."""
     provider = select_provider()
     if provider == "gemini":
         model_name = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
@@ -78,23 +83,26 @@ def build_review_model() -> Optional[BaseChatModel]:
         # validates the model field against that, not against any real
         # model registry.
         model_name = os.environ.get("QWEN_MODEL", "Qwen/Qwen3.8-27B")
+        # Qwen3.8 thinks by default: its <think>…</think> reasoning tokens count
+        # against max_tokens BEFORE the actual structured JSON output begins. The
+        # previous 2048-token cap was enough for a trivial single-finding test, but
+        # a real multi-document vendor review easily exhausts it on thinking alone,
+        # truncating the JSON and causing create_agent to return
+        # structured_response=None. 16384 gives ample room for thinking + a
+        # multi-finding ReviewReport -- but the server rejects
+        # prompt_tokens + max_tokens > --max-model-len outright, and a real report's
+        # prompt (system prompt + tool schemas + rendered HTML) is NOT guaranteed to
+        # leave 16384 tokens of headroom (confirmed: a 16385-token prompt overflowed
+        # a 32768 window by exactly 1 token). `qwen_max_tokens` lets the caller size
+        # this down against the actual prompt for the call; 16384 here is only the
+        # ceiling when no override is given. Thinking is also explicitly disabled --
+        # the structured output doesn't benefit from chain-of-thought reasoning
+        # tokens, and disabling it makes the output budget fully available for the
+        # JSON payload.
         return init_chat_model(model_name, model_provider="openai",
                                 api_key=os.environ.get("QWEN_API_KEY", "EMPTY"),
                                 base_url=os.environ["QWEN_BASE_URL"],
-                                # Qwen3.8 thinks by default: its <think>…</think> reasoning
-                                # tokens count against max_tokens BEFORE the actual structured
-                                # JSON output begins. The previous 2048-token cap was enough
-                                # for a trivial single-finding test, but a real multi-document
-                                # vendor review easily exhausts it on thinking alone, truncating
-                                # the JSON and causing create_agent to return
-                                # structured_response=None. 16384 gives ample room for thinking
-                                # + a multi-finding ReviewReport while staying within the
-                                # server's --max-model-len 32768 (the input prompt needs the
-                                # rest). Thinking is also explicitly disabled here -- the
-                                # structured output doesn't benefit from chain-of-thought
-                                # reasoning tokens, and disabling it makes the output budget
-                                # fully available for the JSON payload.
-                                max_tokens=16384,
+                                max_tokens=qwen_max_tokens if qwen_max_tokens is not None else 16384,
                                 extra_body={"chat_template_kwargs": {"enable_thinking": False}})
     if provider == "openai":
         # No guessed default model name here (this codebase's own convention

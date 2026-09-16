@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -49,6 +50,30 @@ def _strip_head(html: str) -> str:
 _SYSTEM_PROMPT = (Path(__file__).parent / "prompts" / "reviewer.md").read_text(encoding="utf-8")
 
 DEFAULT_MAX_ITERATIONS = 4
+
+# Must match whatever --max-model-len the vLLM server was actually launched with
+# (see the notebook's `vllm serve` cell) -- overridable since that value isn't
+# read from the server automatically and can change between Kaggle sessions.
+QWEN_MAX_MODEL_LEN = int(os.environ.get("QWEN_MAX_MODEL_LEN", "32768"))
+QWEN_MAX_OUTPUT_TOKENS = 16384
+# Covers two things at once: (1) error in the chars/3 estimate below, which has no
+# real Qwen tokenizer behind it, and (2) some -- not unlimited -- headroom for the
+# ReAct loop's own tool-call round trips growing the context within this same pass
+# (each round trip appends to the conversation, but max_tokens is fixed for the
+# whole pass). A pass whose tool results are big enough to eat this margin can
+# still overflow later in the same pass; this only fixes the failure mode actually
+# observed, which was the FIRST call in a pass already exceeding budget.
+QWEN_CONTEXT_SAFETY_MARGIN = 4096
+QWEN_MIN_OUTPUT_TOKENS = 2048
+
+
+def _estimate_tokens(text: str) -> int:
+    """Deliberately conservative token estimate (chars/3, not the more common
+    chars/4) -- this pipeline's prompts (resolved-parameter dumps, tool JSON
+    schemas) are denser with numbers/IDs/punctuation than plain English prose,
+    which tokenizes less efficiently. Only needs to be close enough to size
+    max_tokens safely, not exact -- there is no real Qwen tokenizer client-side."""
+    return len(text) // 3
 
 
 def _pass_instructions(iteration: int) -> str:
@@ -101,14 +126,33 @@ def _build_user_message(state: ReviewState) -> str:
 
 def llm_review(state: ReviewState) -> dict:
     provider = select_provider()
-    model = build_review_model()
+    user_msg = _build_user_message(state)
+
+    qwen_max_tokens = None
+    if provider == "qwen":
+        input_estimate = _estimate_tokens(_SYSTEM_PROMPT) + _estimate_tokens(user_msg)
+        available = QWEN_MAX_MODEL_LEN - input_estimate - QWEN_CONTEXT_SAFETY_MARGIN
+        qwen_max_tokens = max(QWEN_MIN_OUTPUT_TOKENS, min(QWEN_MAX_OUTPUT_TOKENS, available))
+        if available < QWEN_MIN_OUTPUT_TOKENS:
+            logger.warning(
+                "Qwen prompt estimate (~%d tokens) leaves little headroom under "
+                "QWEN_MAX_MODEL_LEN=%d -- output capped at the %d-token floor instead of "
+                "the usual %d; the reviewer may get truncated. Consider trimming the report "
+                "or raising --max-model-len on the vLLM server.",
+                input_estimate, QWEN_MAX_MODEL_LEN, qwen_max_tokens, QWEN_MAX_OUTPUT_TOKENS)
+        elif qwen_max_tokens < QWEN_MAX_OUTPUT_TOKENS:
+            logger.info(
+                "Qwen output budget trimmed to %d tokens (from the %d default) to fit this "
+                "report's ~%d-token prompt under QWEN_MAX_MODEL_LEN=%d.",
+                qwen_max_tokens, QWEN_MAX_OUTPUT_TOKENS, input_estimate, QWEN_MAX_MODEL_LEN)
+
+    model = build_review_model(qwen_max_tokens=qwen_max_tokens)
     if model is None:
         raise RuntimeError("No usable LLM key configured (GEMINI_API_KEY/OPENAI_API_KEY) -- the review "
                             "graph must not be invoked without one; see vdd/pipeline.py's caller.")
     tools = make_tools(state.get("client"))
     agent = create_agent(model=model, tools=tools, system_prompt=_SYSTEM_PROMPT, response_format=ReviewReport)
 
-    user_msg = _build_user_message(state)
     result = agent.invoke({"messages": [{"role": "user", "content": user_msg}]})
     report: ReviewReport | None = result.get("structured_response")
 
