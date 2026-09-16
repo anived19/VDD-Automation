@@ -81,11 +81,21 @@ def build_review_model() -> Optional[BaseChatModel]:
         return init_chat_model(model_name, model_provider="openai",
                                 api_key=os.environ.get("QWEN_API_KEY", "EMPTY"),
                                 base_url=os.environ["QWEN_BASE_URL"],
-                                # Qwen3.8 thinks by default and its own docs suggest very
-                                # large output budgets (262K reasoning / 131K final) --
-                                # both unrealistic for a resource-constrained local server,
-                                # so cap it explicitly rather than inherit that default.
-                                max_tokens=2048)
+                                # Qwen3.8 thinks by default: its <think>…</think> reasoning
+                                # tokens count against max_tokens BEFORE the actual structured
+                                # JSON output begins. The previous 2048-token cap was enough
+                                # for a trivial single-finding test, but a real multi-document
+                                # vendor review easily exhausts it on thinking alone, truncating
+                                # the JSON and causing create_agent to return
+                                # structured_response=None. 16384 gives ample room for thinking
+                                # + a multi-finding ReviewReport while staying within the
+                                # server's --max-model-len 32768 (the input prompt needs the
+                                # rest). Thinking is also explicitly disabled here -- the
+                                # structured output doesn't benefit from chain-of-thought
+                                # reasoning tokens, and disabling it makes the output budget
+                                # fully available for the JSON payload.
+                                max_tokens=16384,
+                                extra_body={"chat_template_kwargs": {"enable_thinking": False}})
     if provider == "openai":
         # No guessed default model name here (this codebase's own convention
         # is "never guess, never fabricate") -- OPENAI_MODEL must be set

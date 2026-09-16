@@ -110,7 +110,49 @@ def llm_review(state: ReviewState) -> dict:
 
     user_msg = _build_user_message(state)
     result = agent.invoke({"messages": [{"role": "user", "content": user_msg}]})
-    report: ReviewReport = result["structured_response"]
+    report: ReviewReport | None = result.get("structured_response")
+
+    if report is None:
+        # --- diagnostic logging: capture WHY the structured response was None ---
+        messages = result.get("messages", [])
+        last_ai = messages[-1] if messages else None
+        raw_content = getattr(last_ai, "content", None) if last_ai else None
+        finish_reason = None
+        response_meta = getattr(last_ai, "response_metadata", None) or {}
+        if isinstance(response_meta, dict):
+            finish_reason = response_meta.get("finish_reason")
+
+        # Classify the raw output shape for quick triage
+        content_str = str(raw_content) if raw_content is not None else "(empty)"
+        if len(content_str) > 2000:
+            content_preview = content_str[:2000] + f"… [truncated, total {len(content_str)} chars]"
+        else:
+            content_preview = content_str
+        looks_like = "unknown"
+        if '"tool_calls"' in content_str or "<tool_call>" in content_str:
+            looks_like = "tool-call block (possible parser mismatch)"
+        elif content_str.rstrip().endswith(("{", '",', '"', ":")):
+            looks_like = "truncated JSON (likely token budget exhaustion)"
+        elif content_str.strip().startswith("{"):
+            looks_like = "JSON object (possible schema validation failure)"
+        else:
+            looks_like = "plain prose or non-JSON"
+
+        logger.warning(
+            "structured_response is None — the LLM's output could not be parsed "
+            "into ReviewReport. Diagnostics:\n"
+            "  finish_reason: %s\n"
+            "  output_shape: %s\n"
+            "  raw_last_message: %s",
+            finish_reason, looks_like, content_preview,
+        )
+        raise RuntimeError(
+            f"LLM returned no usable structured ReviewReport (finish_reason={finish_reason}, "
+            f"output_shape={looks_like}). See WARNING log above for the raw output. "
+            f"Common causes: output truncated by max_tokens, tool-call parser mismatch, "
+            f"or schema validation failure."
+        )
+
     report_dict = report.model_dump()
 
     return {

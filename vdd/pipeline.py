@@ -17,11 +17,14 @@ printed by `run_vendor.py`) for a human to review *after* the report
 exists -- never as a blocking question during generation.
 """
 import json
+import logging
 import os
 import re
 import traceback
 from dataclasses import dataclass, field
 from typing import List, Optional
+
+logger = logging.getLogger(__name__)
 
 from vdd.extract.classify import classify_folder, classify_content, ClassifiedDocs
 from vdd.extract.ocr import extract_text, detect_diagonal_strike
@@ -580,6 +583,7 @@ def _run_review(computed: VendorComputation, client: Optional[FinoscaleClient],
             "token_usage": summarize_usage(final_state.get("pass_usage", [])),
         }
     except Exception as e:
+        logger.warning("LLM review failed, falling back to the deterministic report.", exc_info=True)
         warnings.append(f"LLM review failed, falling back to the deterministic report: {e}")
         return {"context": computed.context, "review_error": str(e)}
 
