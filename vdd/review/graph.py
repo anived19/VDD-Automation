@@ -26,6 +26,7 @@ see `_qwen_output_budget`) but also cuts Gemini spend per pass.
 from __future__ import annotations
 
 import copy
+import json
 import logging
 import os
 from pathlib import Path
@@ -33,6 +34,7 @@ from typing import Any, Optional
 
 import requests
 from langchain.agents import create_agent
+from langchain.agents.middleware import ClearToolUsesEdit, ContextEditingMiddleware, ModelCallLimitMiddleware
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
@@ -57,15 +59,28 @@ DEFAULT_MAX_ITERATIONS = 4
 # (`max_model_len`) on every pass. Set this if that endpoint is unavailable.
 QWEN_MAX_MODEL_LEN_FALLBACK = int(os.environ.get("QWEN_MAX_MODEL_LEN", "32768"))
 # With thinking disabled (model.py) the output is just the ReviewReport JSON:
-# real passes in out/*_review_trace.json ran 1.8k-3.3k chars (~0.6-1k tokens),
-# so 4096 is generous. The old 16384 cap left no room for tool results.
-QWEN_MAX_OUTPUT_TOKENS = 4096
-QWEN_MIN_OUTPUT_TOKENS = 1024
-# Reserved for context growth WITHIN a pass: every tool-call round trip appends
-# the model's call + the tool's result, but max_tokens is fixed for the whole
-# pass. tools.py caps each tool result (_MAX_TOOL_RESULT_CHARS) so this covers
-# a typical pass's 3-5 calls; the count itself is exact (server tokenizer).
-QWEN_MIDPASS_RESERVE = 8192
+# real passes in out/*_review_trace.json ran 1.8k-3.3k chars (~0.6-1k tokens).
+# This is a per-TURN cap, and every turn's output stays in the context for the
+# rest of the pass, so it is also the single biggest lever on mid-pass growth.
+QWEN_MAX_OUTPUT_TOKENS = 2048
+# The invariant the server enforces on EVERY turn, not just the first:
+#     prompt_so_far + max_tokens <= max_model_len
+# A pass that fit its first call at 7k tokens still died at >=28.7k after the
+# model's own turns piled up (observed 2026-09-16). So the loop is bounded, not
+# just the first call: the number of model calls per pass is derived from the
+# measured headroom, assuming each round trip can add a full max_tokens of
+# model output plus one capped tool result. Older tool results are also
+# cleared once the conversation passes QWEN_TOOL_CLEAR_TRIGGER_APPROX.
+QWEN_TOOL_RESULT_TOKENS = 2000            # ~tools._MAX_TOOL_RESULT_CHARS / 3
+QWEN_MAX_MODEL_CALLS = 8
+QWEN_MIN_MODEL_CALLS = 2                  # one tool round trip + the ReviewReport call
+# langchain's approximate counter (~chars/4) reads ~30% LOW for this content
+# (2.86 chars/token measured), and it counts state messages only -- not the
+# system prompt or tool schemas. 10k approximate ~= the 4.5k-token user
+# message plus ~8k real tokens of tool traffic, at which point all but the 2
+# most recent tool results are replaced with a placeholder.
+QWEN_TOOL_CLEAR_TRIGGER_APPROX = 10000
+QWEN_TOOL_RESULTS_KEEP = 2
 # Used only if /tokenize is unreachable. chars/3 undercounted a real prompt by
 # ~13% (2.86 chars/token measured) -- plus a flat allowance for the rendered
 # tool schemas, which the estimate can't see.
@@ -98,7 +113,8 @@ def _qwen_count_tokens(messages: list[dict], tools: list[dict]) -> Optional[tupl
         return None
 
 
-def _qwen_output_budget(user_msg: str, tools: list) -> int:
+def _qwen_budget(user_msg: str, tools: list) -> tuple[int, int]:
+    """-> (max_tokens per turn, model calls allowed this pass)."""
     messages = [{"role": "system", "content": _SYSTEM_PROMPT}, {"role": "user", "content": user_msg}]
     # Mirror what create_agent binds: every tool, plus ReviewReport itself (the
     # structured-output ToolStrategy adds it as one more tool -- visible as a
@@ -113,19 +129,57 @@ def _qwen_output_budget(user_msg: str, tools: list) -> int:
         max_model_len = QWEN_MAX_MODEL_LEN_FALLBACK
         how = "estimated"
 
-    available = max_model_len - prompt_tokens - QWEN_MIDPASS_RESERVE
-    budget = max(QWEN_MIN_OUTPUT_TOKENS, min(QWEN_MAX_OUTPUT_TOKENS, available))
-    if available < QWEN_MIN_OUTPUT_TOKENS:
+    max_tokens = QWEN_MAX_OUTPUT_TOKENS
+    headroom = max_model_len - prompt_tokens - max_tokens
+    per_round_trip = max_tokens + QWEN_TOOL_RESULT_TOKENS
+    calls = max(QWEN_MIN_MODEL_CALLS, min(QWEN_MAX_MODEL_CALLS, headroom // per_round_trip))
+    if headroom < per_round_trip * QWEN_MIN_MODEL_CALLS:
         logger.warning(
-            "Qwen review: prompt is %d tokens (%s) against max_model_len=%d -- only %d left after the "
-            "%d-token mid-pass reserve, so max_tokens is pinned at the %d floor. Expect the server to "
-            "reject a later call in this pass if the model uses several tools; raise --max-model-len.",
-            prompt_tokens, how, max_model_len, available, QWEN_MIDPASS_RESERVE, budget)
+            "Qwen review: prompt is %d tokens (%s) against max_model_len=%d -- only %d tokens of headroom, "
+            "less than the %d two round trips need. The pass may be rejected by the server; raise "
+            "--max-model-len on the vLLM server.", prompt_tokens, how, max_model_len, headroom,
+            per_round_trip * QWEN_MIN_MODEL_CALLS)
     else:
-        logger.info("Qwen review: prompt %d tokens (%s), max_model_len %d, max_tokens %d, "
-                    "%d tokens of headroom for tool results this pass.",
-                    prompt_tokens, how, max_model_len, budget, available - budget)
-    return budget
+        logger.info("Qwen review: prompt %d tokens (%s), max_model_len %d, max_tokens %d/turn, "
+                    "%d tokens of headroom -> at most %d model calls this pass.",
+                    prompt_tokens, how, max_model_len, max_tokens, headroom, calls)
+    return max_tokens, calls
+
+
+def _qwen_middleware(model_calls: int) -> list:
+    return [
+        ModelCallLimitMiddleware(run_limit=model_calls, exit_behavior="end"),
+        ContextEditingMiddleware(edits=[ClearToolUsesEdit(
+            trigger=QWEN_TOOL_CLEAR_TRIGGER_APPROX, keep=QWEN_TOOL_RESULTS_KEEP,
+            placeholder="[cleared -- this older tool result was removed to stay within the model's "
+                        "context window; call the tool again if you still need it]")]),
+    ]
+
+
+def _dump_failed_pass(state: ReviewState, messages: list, error: str) -> Optional[str]:
+    """Persist the partial transcript of a pass that didn't produce a
+    ReviewReport -- the ReAct loop's own messages are the only evidence of
+    WHY (which tool was called how often, how big each result was, what the
+    model actually emitted), and until this existed every failure discarded
+    them. Same local-only JSON idiom as trace.py; never transmitted."""
+    out_dir = state.get("out_dir")
+    serialized = serialize_messages(messages)
+    summary = []
+    for i, m in enumerate(serialized):
+        name = m.get("tool_name") or ",".join(tc.get("name") or "?" for tc in m.get("tool_calls") or [])
+        summary.append(f"  #{i:<3} {m['type']:<11} {name:<28} {len(str(m.get('content') or '')):>7,} chars")
+    logger.warning("Review pass %d failed after %d messages (%s). Transcript:\n%s",
+                   state.get("iteration", 1), len(serialized), error[:300], "\n".join(summary) or "  (none)")
+    if not out_dir:
+        return None
+    os.makedirs(out_dir, exist_ok=True)
+    safe = "".join(c if c.isalnum() else "_" for c in state.get("vendor_name", "")).strip("_").upper() or "VENDOR"
+    path = os.path.join(out_dir, f"{safe}_review_failure_pass{state.get('iteration', 1)}.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"vendor_name": state.get("vendor_name"), "iteration": state.get("iteration", 1),
+                   "provider": select_provider(), "error": error, "messages": serialized}, f, indent=2, default=str)
+    logger.warning("Full transcript written to %s", path)
+    return path
 
 
 def _pass_instructions(iteration: int) -> str:
@@ -181,19 +235,33 @@ def llm_review(state: ReviewState) -> dict:
     user_msg = _build_user_message(state)
     tools = make_tools(state.get("client"))
 
-    qwen_max_tokens = _qwen_output_budget(user_msg, tools) if provider == "qwen" else None
+    qwen_max_tokens, middleware = None, []
+    if provider == "qwen":
+        qwen_max_tokens, model_calls = _qwen_budget(user_msg, tools)
+        middleware = _qwen_middleware(model_calls)
     model = build_review_model(qwen_max_tokens=qwen_max_tokens)
     if model is None:
         raise RuntimeError("No usable LLM key configured (GEMINI_API_KEY/OPENAI_API_KEY) -- the review "
                             "graph must not be invoked without one; see vdd/pipeline.py's caller.")
-    agent = create_agent(model=model, tools=tools, system_prompt=_SYSTEM_PROMPT, response_format=ReviewReport)
+    agent = create_agent(model=model, tools=tools, system_prompt=_SYSTEM_PROMPT, response_format=ReviewReport,
+                         middleware=middleware)
 
-    result = agent.invoke({"messages": [{"role": "user", "content": user_msg}]})
+    # Streamed rather than invoke()d so the messages accumulated so far survive
+    # an exception mid-pass (e.g. the server rejecting a later turn) -- invoke()
+    # would raise with nothing to show for what the loop had done.
+    result: dict = {}
+    try:
+        for result in agent.stream({"messages": [{"role": "user", "content": user_msg}]}, stream_mode="values"):
+            pass
+    except Exception as e:
+        _dump_failed_pass(state, result.get("messages", []), f"{type(e).__name__}: {e}")
+        raise
     report: ReviewReport | None = result.get("structured_response")
 
     if report is None:
         # --- diagnostic logging: capture WHY the structured response was None ---
         messages = result.get("messages", [])
+        _dump_failed_pass(state, messages, "agent finished without a structured ReviewReport")
         last_ai = messages[-1] if messages else None
         raw_content = getattr(last_ai, "content", None) if last_ai else None
         finish_reason = None

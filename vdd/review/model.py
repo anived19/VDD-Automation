@@ -86,14 +86,14 @@ def build_review_model(*, qwen_max_tokens: Optional[int] = None) -> Optional[Bas
         # Thinking is disabled: Qwen3.8's <think>…</think> tokens would count against
         # max_tokens before the JSON starts, and the structured ReviewReport doesn't
         # benefit from them. With thinking off the output IS the JSON, and real
-        # passes run ~0.6-1k tokens -- the caller (graph.py::_qwen_output_budget)
-        # sizes max_tokens against the exact prompt length for that pass, because
-        # the server rejects prompt_tokens + max_tokens > --max-model-len outright.
-        # The default here is only for callers that don't pass a budget.
+        # passes run ~0.6-1k tokens. The caller (graph.py::_qwen_budget) owns the
+        # cap because it is a per-turn cap that also bounds mid-pass context
+        # growth; the server rejects prompt_tokens + max_tokens > --max-model-len
+        # on every turn. The default here is only for callers that don't pass one.
         return init_chat_model(model_name, model_provider="openai",
                                 api_key=os.environ.get("QWEN_API_KEY", "EMPTY"),
                                 base_url=os.environ["QWEN_BASE_URL"],
-                                max_tokens=qwen_max_tokens if qwen_max_tokens is not None else 4096,
+                                max_tokens=qwen_max_tokens if qwen_max_tokens is not None else 2048,
                                 extra_body={"chat_template_kwargs": {"enable_thinking": False}})
     if provider == "openai":
         # No guessed default model name here (this codebase's own convention

@@ -558,6 +558,7 @@ def _run_review(computed: VendorComputation, client: Optional[FinoscaleClient],
         init_state = {
             "vendor_name": computed.vendor_name,
             "scoring_model_path": scoring_model_path,
+            "out_dir": out_dir,
             "client": client,
             "entity": computed.entity,
             "resolved": computed.resolved,

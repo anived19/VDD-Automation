@@ -16,6 +16,7 @@ from typing import Annotated, Any, Optional, TypedDict
 class ReviewState(TypedDict, total=False):
     vendor_name: str
     scoring_model_path: str
+    out_dir: str  # where a failed pass's transcript is written (graph._dump_failed_pass)
     client: Optional[Any]  # FinoscaleClient | None -- for the live-refetch review tools
 
     entity: dict[str, Any]
