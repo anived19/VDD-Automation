@@ -34,7 +34,9 @@ from typing import Any, Optional
 
 import requests
 from langchain.agents import create_agent
-from langchain.agents.middleware import ClearToolUsesEdit, ContextEditingMiddleware, ModelCallLimitMiddleware
+from langchain.agents.middleware import (AgentMiddleware, ClearToolUsesEdit, ContextEditingMiddleware,
+                                         ModelCallLimitMiddleware)
+from langchain_core.messages import HumanMessage
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
@@ -81,6 +83,10 @@ QWEN_MIN_MODEL_CALLS = 2                  # one tool round trip + the ReviewRepo
 # most recent tool results are replaced with a placeholder.
 QWEN_TOOL_CLEAR_TRIGGER_APPROX = 10000
 QWEN_TOOL_RESULTS_KEEP = 2
+# Stated in the prompt for every provider; enforced (see _FinishWithReport) only
+# for Qwen, where the number is derived from the measured context headroom.
+# Gemini converges in 1-2 tool calls on its own (every out/*_review_trace.json).
+DEFAULT_TOOL_CALLS_PER_PASS = 6
 # Used only if /tokenize is unreachable. chars/3 undercounted a real prompt by
 # ~13% (2.86 chars/token measured) -- plus a flat allowance for the rendered
 # tool schemas, which the estimate can't see.
@@ -146,14 +152,53 @@ def _qwen_budget(user_msg: str, tools: list) -> tuple[int, int]:
     return max_tokens, calls
 
 
+class _FinishWithReport(AgentMiddleware):
+    """Guarantees the pass ends with a ReviewReport. create_agent binds every
+    turn with tool_choice="any" when a structured output is requested, so the
+    model can never answer in prose -- calling `ReviewReport` is the only
+    exit. Observed 2026-09-16: Qwen3.8-27B spent all 5 allowed calls on
+    recheck tools (one an identical repeat) and never took that exit. On the
+    last allowed call this strips every other tool from the request, leaving
+    ReviewReport as the only legal move, and appends a one-line nudge for
+    that call only (not persisted to state)."""
+
+    def __init__(self, model_calls: int):
+        super().__init__()
+        self.model_calls = model_calls
+        self.calls = 0
+
+    def wrap_model_call(self, request, handler):
+        self.calls += 1
+        if self.calls >= self.model_calls:
+            logger.info("Qwen review: model call %d/%d -- forcing ReviewReport (all other tools withheld).",
+                        self.calls, self.model_calls)
+            nudge = HumanMessage(content="Your tool budget for this pass is used up. Submit your ReviewReport "
+                                         "now, using only the evidence already in this conversation -- anything "
+                                         "you could not verify goes in as action='escalate'.")
+            request = request.override(tools=[], messages=list(request.messages) + [nudge])
+        return handler(request)
+
+
 def _qwen_middleware(model_calls: int) -> list:
     return [
-        ModelCallLimitMiddleware(run_limit=model_calls, exit_behavior="end"),
+        _FinishWithReport(model_calls),
+        # Backstop only: reached if the forced ReviewReport call itself fails
+        # schema validation twice (ToolStrategy re-prompts on a bad payload).
+        ModelCallLimitMiddleware(run_limit=model_calls + 2, exit_behavior="end"),
         ContextEditingMiddleware(edits=[ClearToolUsesEdit(
             trigger=QWEN_TOOL_CLEAR_TRIGGER_APPROX, keep=QWEN_TOOL_RESULTS_KEEP,
             placeholder="[cleared -- this older tool result was removed to stay within the model's "
                         "context window; call the tool again if you still need it]")]),
     ]
+
+
+def _tool_budget_section(tool_calls: int) -> str:
+    return ("## Tool budget for this pass\n"
+            f"You may make at most {tool_calls} tool call(s) this pass. Then you MUST submit your findings by "
+            "calling `ReviewReport` -- that call is how you finish; without it the pass fails and nothing you "
+            "found is recorded. Never call the same tool with the same arguments twice in a pass: the result "
+            "will not change. Spend calls on the cross-check items first; anything you can't verify within "
+            "budget goes in as action='escalate', not as another call.")
 
 
 def _dump_failed_pass(state: ReviewState, messages: list, error: str) -> Optional[str]:
@@ -235,10 +280,14 @@ def llm_review(state: ReviewState) -> dict:
     user_msg = _build_user_message(state)
     tools = make_tools(state.get("client"))
 
-    qwen_max_tokens, middleware = None, []
+    qwen_max_tokens, middleware, tool_calls = None, [], DEFAULT_TOOL_CALLS_PER_PASS
     if provider == "qwen":
+        # Counted before the budget section is appended -- it's ~80 tokens, well
+        # inside the slack the per-round-trip allowance carries.
         qwen_max_tokens, model_calls = _qwen_budget(user_msg, tools)
         middleware = _qwen_middleware(model_calls)
+        tool_calls = model_calls - 1  # the last call is reserved for ReviewReport
+    user_msg += "\n\n" + _tool_budget_section(tool_calls)
     model = build_review_model(qwen_max_tokens=qwen_max_tokens)
     if model is None:
         raise RuntimeError("No usable LLM key configured (GEMINI_API_KEY/OPENAI_API_KEY) -- the review "

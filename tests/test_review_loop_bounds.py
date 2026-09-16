@@ -19,19 +19,38 @@ from langchain_core.messages import AIMessage
 from vdd.review import graph
 
 
-class _ToolLoopingModel(GenericFakeChatModel):
-    """Calls recheck_pep on every turn, forever -- never emits a ReviewReport."""
+class _ToolHappyModel(GenericFakeChatModel):
+    """Behaves like the 2026-09-16 Kaggle transcript: calls a recheck tool on
+    every turn (repeating the same call, too) and only ever calls
+    ReviewReport when that is the sole tool it's offered."""
 
     def __init__(self):
+        self._offered: list[str] = []
+
         def gen() -> Iterator[AIMessage]:
             i = 0
             while True:
                 i += 1
-                yield AIMessage(content="", tool_calls=[{"name": "recheck_pep", "id": f"c{i}",
-                                                          "args": {"person_names": ["Nobody Real"]}}])
+                if self._offered == ["ReviewReport"]:
+                    yield AIMessage(content="", tool_calls=[{"name": "ReviewReport", "id": f"r{i}", "args": {
+                        "findings": [{"issue": "forced finish", "proposed_note": "budget exhausted",
+                                      "confidence": "unverified", "action": "escalate"}],
+                        "verdict": "approved", "thoroughness_note": "forced"}}])
+                else:
+                    yield AIMessage(content="", tool_calls=[{"name": "recheck_pep", "id": f"c{i}",
+                                                              "args": {"person_names": ["Nobody Real"]}}])
         super().__init__(messages=gen())
 
     def bind_tools(self, tools: Any, **kwargs: Any):
+        self._offered = [getattr(t, "name", None) or t["function"]["name"] for t in tools]
+        return self
+
+
+class _NeverFinishesModel(_ToolHappyModel):
+    """Ignores even the forced-finish request -- exercises the backstop."""
+
+    def bind_tools(self, tools: Any, **kwargs: Any):
+        self._offered = ["recheck_pep"]
         return self
 
 
@@ -79,16 +98,29 @@ def test_budget_derives_model_call_limit_from_measured_headroom(qwen_env):
     assert calls == 5
 
 
-def test_tool_loop_is_cut_off_and_transcript_written(qwen_env, monkeypatch, tmp_path):
-    monkeypatch.setattr(graph, "build_review_model", lambda **kw: _ToolLoopingModel())
+def test_tool_happy_model_is_forced_to_submit_a_report(qwen_env, monkeypatch, tmp_path):
+    monkeypatch.setattr(graph, "build_review_model", lambda **kw: _ToolHappyModel())
+    out = graph.llm_review(_state(tmp_path))
+    assert out["last_verdict"] == "approved"
+    assert out["findings"][0]["issue"] == "forced finish"
+    trace = out["message_traces"][0]
+    tool_turns = [m for m in trace if m["type"] == "ai" and any(tc["name"] == "recheck_pep" for tc in m["tool_calls"])]
+    # 5 model calls allowed -> 4 tool rounds, then the 5th call is ReviewReport-only
+    assert len(tool_turns) == 4
+    # the identical repeats came back as pointers, not the full result again
+    repeats = [m for m in trace if m["type"] == "tool_result" and "repeated_call" in str(m["content"])]
+    assert len(repeats) == 3
+    assert not list(tmp_path.glob("*_review_failure_*.json")), "a successful pass writes no failure dump"
+
+
+def test_model_that_ignores_forced_finish_hits_backstop(qwen_env, monkeypatch, tmp_path):
+    monkeypatch.setattr(graph, "build_review_model", lambda **kw: _NeverFinishesModel())
     with pytest.raises(RuntimeError, match="no usable structured ReviewReport"):
         graph.llm_review(_state(tmp_path))
-    dumps = list(tmp_path.glob("TEST_VENDOR_review_failure_pass1.json"))
-    assert dumps, "failed pass must leave its transcript behind"
-    d = json.loads(dumps[0].read_text(encoding="utf-8"))
+    d = json.loads((tmp_path / "TEST_VENDOR_review_failure_pass1.json").read_text(encoding="utf-8"))
     ai_turns = [m for m in d["messages"] if m["type"] == "ai" and m["tool_calls"]]
-    # 5 allowed model calls -> at most 5 tool-calling turns, not an unbounded loop
-    assert 1 <= len(ai_turns) <= 5
+    # 5 allowed + 2 backstop -> never more than 7 model calls, not an unbounded loop
+    assert 1 <= len(ai_turns) <= 7
     assert d["provider"] == "qwen"
 
 

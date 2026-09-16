@@ -38,13 +38,25 @@ _MAX_TOOL_RESULT_CHARS = 6000
 _WEB_SNIPPET_CHARS = 700
 
 
-def _cap(fn):
-    """Truncate an oversized tool result instead of letting it eat the context.
-    functools.wraps keeps __name__/__doc__/__annotations__ and sets __wrapped__,
-    which inspect.signature follows -- so create_agent still infers the exact
-    same tool schema from the original function."""
+def _cap(fn, seen: dict):
+    """Two guards on every tool result, since each one is appended to the
+    agent's context for the rest of the pass:
+      - an identical repeat (same tool, same arguments -- observed 2026-09-16:
+        Qwen3.8 called recheck_gstin_live twice back to back) returns a short
+        pointer to the earlier result instead of the full payload again;
+      - an oversized result is truncated rather than allowed to eat the window.
+    `seen` is per make_tools() call, i.e. per pass. functools.wraps keeps
+    __name__/__doc__/__annotations__ and sets __wrapped__, which
+    inspect.signature follows -- create_agent still infers the exact same tool
+    schema from the original function."""
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
+        key = (fn.__name__, json.dumps([args, kwargs], sort_keys=True, default=str))
+        if key in seen:
+            return {"repeated_call": True,
+                    "note": f"You already called {fn.__name__} with exactly these arguments this pass (call "
+                            f"#{seen[key]}); the result has not changed -- use that result, do not call again."}
+        seen[key] = len(seen) + 1
         result = fn(*args, **kwargs)
         s = json.dumps(result, default=str)
         if len(s) <= _MAX_TOOL_RESULT_CHARS:
@@ -215,5 +227,6 @@ def make_tools(client: Optional[FinoscaleClient]) -> list:
                  "content": (r.get("content") or "")[:_WEB_SNIPPET_CHARS]}
                 for r in response.get("results", [])]
 
-    return [_cap(t) for t in (recheck_sanctions, recheck_pep, recheck_drt_sarfaesi, recheck_gstin_live,
-                              recheck_bank_verification, recheck_zigram_screening, web_search)]
+    seen: dict = {}
+    return [_cap(t, seen) for t in (recheck_sanctions, recheck_pep, recheck_drt_sarfaesi, recheck_gstin_live,
+                                    recheck_bank_verification, recheck_zigram_screening, web_search)]
