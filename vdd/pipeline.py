@@ -31,7 +31,6 @@ from vdd.resolve.resolvers import resolve_all, ApiBundle, Resolved
 from vdd.score.engine import ScoringEngine
 from vdd.report.build_context import build_context
 from vdd.report.render import generate_report
-from vdd.report.render import build as render_build
 
 _FIELD_MERGE_MAP = {
     "gstin": ["gst_certificate", "kyc_form"],
@@ -560,7 +559,6 @@ def _run_review(computed: VendorComputation, client: Optional[FinoscaleClient],
             "entity": computed.entity,
             "resolved": computed.resolved,
             "context": computed.context,
-            "html": render_build(computed.context),
             "cross_check_items": computed.cross_check_items,
             "iteration": 1,
             "max_iterations": max_review_iterations or DEFAULT_MAX_ITERATIONS,

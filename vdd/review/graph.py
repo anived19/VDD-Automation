@@ -6,14 +6,15 @@ the model's own `verdict` says the report is ready, up to a hard safety
 cap (`max_iterations`, a cost/latency backstop, not the intended stop
 condition).
 
-The LLM never edits HTML directly. It proposes a correction to a
+The LLM never edits the report directly. It proposes a correction to a
 `resolved[parameter_id]` value or an `entity[field]` value; this graph's
 `apply_corrections` node patches that and calls back into the existing
-deterministic `ScoringEngine` / `build_context` / `render.build` to
-regenerate the report. See vdd/pipeline.py for how this graph is invoked
-and what happens if it errors out entirely (falls back to the
-deterministic-only report -- this graph is not responsible for that
-fallback, only for running the loop when it IS invoked).
+deterministic `ScoringEngine` / `build_context` to re-derive the report
+context, which the pipeline renders once at the end. See vdd/pipeline.py
+for how this graph is invoked and what happens if it errors out entirely
+(falls back to the deterministic-only report -- this graph is not
+responsible for that fallback, only for running the loop when it IS
+invoked).
 """
 from __future__ import annotations
 
@@ -26,8 +27,8 @@ from langchain.agents import create_agent
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
-from vdd.report import render
 from vdd.report.build_context import build_context
+from vdd.report.render import build_text
 from vdd.resolve.resolvers import Resolved
 from vdd.review.model import build_review_model, select_provider
 from vdd.review.schemas import ReviewReport
@@ -83,8 +84,8 @@ def _build_user_message(state: ReviewState) -> str:
         "## Cross-check items (the pipeline's own flagged judgment calls / gaps)",
         "\n".join(f"- {i}" for i in state.get("cross_check_items", [])) or "(none)",
         "",
-        "## Rendered report (HTML)",
-        state.get("html", ""),
+        "## The report as the analyst will see it (plain-text rendering)",
+        build_text(state.get("context", {})),
     ]
     if iteration > 1:
         parts += ["", "## History of previous passes", _format_history(state.get("passes", []))]
@@ -148,10 +149,9 @@ def apply_corrections(state: ReviewState) -> dict:
     engine = ScoringEngine(state["scoring_model_path"])
     result = engine.score_no_consent(resolved)
     context = build_context(entity, result)
-    html = render.build(context)
 
     return {
-        "entity": entity, "resolved": resolved, "context": context, "html": html,
+        "entity": entity, "resolved": resolved, "context": context,
         "corrections_applied": corrections, "escalations": escalations,
         "iteration": state.get("iteration", 1) + 1,
     }
