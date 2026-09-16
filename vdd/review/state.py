@@ -1,7 +1,7 @@
 """LangGraph state schema for the report review loop.
 
 Fields without `Annotated[..., operator.add]` use LangGraph's default
-"last write wins" replace semantics (entity/resolved/context/html get
+"last write wins" replace semantics (entity/resolved/context get
 replaced wholesale by `apply_corrections` after every pass -- there's
 nothing to accumulate about them). `findings`/`corrections_applied`/
 `escalations`/`passes` accumulate across the whole run so the final trace
@@ -21,7 +21,6 @@ class ReviewState(TypedDict, total=False):
     entity: dict[str, Any]
     resolved: dict[str, Any]  # dict[str, vdd.resolve.resolvers.Resolved]
     context: dict[str, Any]
-    html: str
     cross_check_items: list[str]
 
     iteration: int

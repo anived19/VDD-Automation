@@ -6,30 +6,39 @@ the model's own `verdict` says the report is ready, up to a hard safety
 cap (`max_iterations`, a cost/latency backstop, not the intended stop
 condition).
 
-The LLM never edits HTML directly. It proposes a correction to a
+The LLM never edits the report directly. It proposes a correction to a
 `resolved[parameter_id]` value or an `entity[field]` value; this graph's
 `apply_corrections` node patches that and calls back into the existing
-deterministic `ScoringEngine` / `build_context` / `render.build` to
-regenerate the report. See vdd/pipeline.py for how this graph is invoked
-and what happens if it errors out entirely (falls back to the
-deterministic-only report -- this graph is not responsible for that
-fallback, only for running the loop when it IS invoked).
+deterministic `ScoringEngine` / `build_context` to re-derive the report
+context, which the pipeline renders once at the end. See vdd/pipeline.py
+for how this graph is invoked and what happens if it errors out entirely
+(falls back to the deterministic-only report -- this graph is not
+responsible for that fallback, only for running the loop when it IS
+invoked).
+
+Context budget: the reviewer is shown `render.build_text(context)` -- the
+same report the analyst gets, as plain text -- never the HTML. Measured on
+a real Skandan report with the exact Qwen3.8 tokenizer, the HTML alone was
+~16k tokens of a ~21k-token first call; the data underneath it is a small
+fraction of that. This matters for the self-hosted Qwen path (32k window,
+see `_qwen_output_budget`) but also cuts Gemini spend per pass.
 """
 from __future__ import annotations
 
 import copy
 import logging
 import os
-import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
+import requests
 from langchain.agents import create_agent
+from langchain_core.utils.function_calling import convert_to_openai_tool
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
-from vdd.report import render
 from vdd.report.build_context import build_context
+from vdd.report.render import build_text
 from vdd.resolve.resolvers import Resolved
 from vdd.review.model import build_review_model, select_provider
 from vdd.review.schemas import ReviewReport
@@ -40,40 +49,83 @@ from vdd.score.engine import ScoringEngine
 
 logger = logging.getLogger(__name__)
 
-
-def _strip_head(html: str) -> str:
-    """Drop the <head>...</head> block (~3.5k+ tokens of inline CSS/meta)
-    before the report goes to the reviewer -- it reasons over the data,
-    never the styling."""
-    return re.sub(r"<head\b[^>]*>.*?</head>", "", html, count=1, flags=re.DOTALL | re.IGNORECASE)
-
 _SYSTEM_PROMPT = (Path(__file__).parent / "prompts" / "reviewer.md").read_text(encoding="utf-8")
 
 DEFAULT_MAX_ITERATIONS = 4
 
-# Must match whatever --max-model-len the vLLM server was actually launched with
-# (see the notebook's `vllm serve` cell) -- overridable since that value isn't
-# read from the server automatically and can change between Kaggle sessions.
-QWEN_MAX_MODEL_LEN = int(os.environ.get("QWEN_MAX_MODEL_LEN", "32768"))
-QWEN_MAX_OUTPUT_TOKENS = 16384
-# Covers two things at once: (1) error in the chars/3 estimate below, which has no
-# real Qwen tokenizer behind it, and (2) some -- not unlimited -- headroom for the
-# ReAct loop's own tool-call round trips growing the context within this same pass
-# (each round trip appends to the conversation, but max_tokens is fixed for the
-# whole pass). A pass whose tool results are big enough to eat this margin can
-# still overflow later in the same pass; this only fixes the failure mode actually
-# observed, which was the FIRST call in a pass already exceeding budget.
-QWEN_CONTEXT_SAFETY_MARGIN = 4096
-QWEN_MIN_OUTPUT_TOKENS = 2048
+# Fallback only -- the real value is read off the server's /tokenize response
+# (`max_model_len`) on every pass. Set this if that endpoint is unavailable.
+QWEN_MAX_MODEL_LEN_FALLBACK = int(os.environ.get("QWEN_MAX_MODEL_LEN", "32768"))
+# With thinking disabled (model.py) the output is just the ReviewReport JSON:
+# real passes in out/*_review_trace.json ran 1.8k-3.3k chars (~0.6-1k tokens),
+# so 4096 is generous. The old 16384 cap left no room for tool results.
+QWEN_MAX_OUTPUT_TOKENS = 4096
+QWEN_MIN_OUTPUT_TOKENS = 1024
+# Reserved for context growth WITHIN a pass: every tool-call round trip appends
+# the model's call + the tool's result, but max_tokens is fixed for the whole
+# pass. tools.py caps each tool result (_MAX_TOOL_RESULT_CHARS) so this covers
+# a typical pass's 3-5 calls; the count itself is exact (server tokenizer).
+QWEN_MIDPASS_RESERVE = 8192
+# Used only if /tokenize is unreachable. chars/3 undercounted a real prompt by
+# ~13% (2.86 chars/token measured) -- plus a flat allowance for the rendered
+# tool schemas, which the estimate can't see.
+_FALLBACK_CHARS_PER_TOKEN = 2.5
+_FALLBACK_TOOL_SCHEMA_TOKENS = 2500
 
 
-def _estimate_tokens(text: str) -> int:
-    """Deliberately conservative token estimate (chars/3, not the more common
-    chars/4) -- this pipeline's prompts (resolved-parameter dumps, tool JSON
-    schemas) are denser with numbers/IDs/punctuation than plain English prose,
-    which tokenizes less efficiently. Only needs to be close enough to size
-    max_tokens safely, not exact -- there is no real Qwen tokenizer client-side."""
-    return len(text) // 3
+def _qwen_count_tokens(messages: list[dict], tools: list[dict]) -> Optional[tuple[int, int]]:
+    """Exact (prompt_tokens, max_model_len) from vLLM's /tokenize, which applies
+    the same chat template + tool rendering + chat_template_kwargs the real
+    completion call will -- so this IS the number the server checks against
+    --max-model-len, not an estimate. Costs no GPU inference. None on any
+    failure so the caller can fall back rather than abort the review."""
+    base = os.environ.get("QWEN_BASE_URL", "").rstrip("/")
+    if not base:
+        return None
+    # /tokenize lives at the server root, not under the OpenAI-compatible /v1.
+    url = (base[:-3] if base.endswith("/v1") else base) + "/tokenize"
+    body = {"model": os.environ.get("QWEN_MODEL", "Qwen/Qwen3.8-27B"), "messages": messages,
+            "tools": tools, "add_generation_prompt": True,
+            "chat_template_kwargs": {"enable_thinking": False}}
+    try:
+        r = requests.post(url, json=body, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+        return int(data["count"]), int(data.get("max_model_len") or QWEN_MAX_MODEL_LEN_FALLBACK)
+    except Exception as e:
+        logger.warning("vLLM /tokenize unavailable (%s: %s) -- falling back to a character estimate "
+                        "for the Qwen output budget.", type(e).__name__, e)
+        return None
+
+
+def _qwen_output_budget(user_msg: str, tools: list) -> int:
+    messages = [{"role": "system", "content": _SYSTEM_PROMPT}, {"role": "user", "content": user_msg}]
+    # Mirror what create_agent binds: every tool, plus ReviewReport itself (the
+    # structured-output ToolStrategy adds it as one more tool -- visible as a
+    # `ReviewReport` tool_result in every trace).
+    tool_schemas = [convert_to_openai_tool(t) for t in tools] + [convert_to_openai_tool(ReviewReport)]
+    counted = _qwen_count_tokens(messages, tool_schemas)
+    if counted is not None:
+        prompt_tokens, max_model_len = counted
+        how = "exact"
+    else:
+        prompt_tokens = int((len(_SYSTEM_PROMPT) + len(user_msg)) / _FALLBACK_CHARS_PER_TOKEN) + _FALLBACK_TOOL_SCHEMA_TOKENS
+        max_model_len = QWEN_MAX_MODEL_LEN_FALLBACK
+        how = "estimated"
+
+    available = max_model_len - prompt_tokens - QWEN_MIDPASS_RESERVE
+    budget = max(QWEN_MIN_OUTPUT_TOKENS, min(QWEN_MAX_OUTPUT_TOKENS, available))
+    if available < QWEN_MIN_OUTPUT_TOKENS:
+        logger.warning(
+            "Qwen review: prompt is %d tokens (%s) against max_model_len=%d -- only %d left after the "
+            "%d-token mid-pass reserve, so max_tokens is pinned at the %d floor. Expect the server to "
+            "reject a later call in this pass if the model uses several tools; raise --max-model-len.",
+            prompt_tokens, how, max_model_len, available, QWEN_MIDPASS_RESERVE, budget)
+    else:
+        logger.info("Qwen review: prompt %d tokens (%s), max_model_len %d, max_tokens %d, "
+                    "%d tokens of headroom for tool results this pass.",
+                    prompt_tokens, how, max_model_len, budget, available - budget)
+    return budget
 
 
 def _pass_instructions(iteration: int) -> str:
@@ -116,8 +168,8 @@ def _build_user_message(state: ReviewState) -> str:
         "## Cross-check items (the pipeline's own flagged judgment calls / gaps)",
         "\n".join(f"- {i}" for i in state.get("cross_check_items", [])) or "(none)",
         "",
-        "## Rendered report (HTML)",
-        _strip_head(state.get("html", "")),
+        "## The report as the analyst will see it (plain-text rendering)",
+        build_text(state.get("context", {})),
     ]
     if iteration > 1:
         parts += ["", "## History of previous passes", _format_history(state.get("passes", []))]
@@ -127,30 +179,13 @@ def _build_user_message(state: ReviewState) -> str:
 def llm_review(state: ReviewState) -> dict:
     provider = select_provider()
     user_msg = _build_user_message(state)
+    tools = make_tools(state.get("client"))
 
-    qwen_max_tokens = None
-    if provider == "qwen":
-        input_estimate = _estimate_tokens(_SYSTEM_PROMPT) + _estimate_tokens(user_msg)
-        available = QWEN_MAX_MODEL_LEN - input_estimate - QWEN_CONTEXT_SAFETY_MARGIN
-        qwen_max_tokens = max(QWEN_MIN_OUTPUT_TOKENS, min(QWEN_MAX_OUTPUT_TOKENS, available))
-        if available < QWEN_MIN_OUTPUT_TOKENS:
-            logger.warning(
-                "Qwen prompt estimate (~%d tokens) leaves little headroom under "
-                "QWEN_MAX_MODEL_LEN=%d -- output capped at the %d-token floor instead of "
-                "the usual %d; the reviewer may get truncated. Consider trimming the report "
-                "or raising --max-model-len on the vLLM server.",
-                input_estimate, QWEN_MAX_MODEL_LEN, qwen_max_tokens, QWEN_MAX_OUTPUT_TOKENS)
-        elif qwen_max_tokens < QWEN_MAX_OUTPUT_TOKENS:
-            logger.info(
-                "Qwen output budget trimmed to %d tokens (from the %d default) to fit this "
-                "report's ~%d-token prompt under QWEN_MAX_MODEL_LEN=%d.",
-                qwen_max_tokens, QWEN_MAX_OUTPUT_TOKENS, input_estimate, QWEN_MAX_MODEL_LEN)
-
+    qwen_max_tokens = _qwen_output_budget(user_msg, tools) if provider == "qwen" else None
     model = build_review_model(qwen_max_tokens=qwen_max_tokens)
     if model is None:
         raise RuntimeError("No usable LLM key configured (GEMINI_API_KEY/OPENAI_API_KEY) -- the review "
                             "graph must not be invoked without one; see vdd/pipeline.py's caller.")
-    tools = make_tools(state.get("client"))
     agent = create_agent(model=model, tools=tools, system_prompt=_SYSTEM_PROMPT, response_format=ReviewReport)
 
     result = agent.invoke({"messages": [{"role": "user", "content": user_msg}]})
@@ -242,10 +277,9 @@ def apply_corrections(state: ReviewState) -> dict:
     engine = ScoringEngine(state["scoring_model_path"])
     result = engine.score_no_consent(resolved)
     context = build_context(entity, result)
-    html = render.build(context)
 
     return {
-        "entity": entity, "resolved": resolved, "context": context, "html": html,
+        "entity": entity, "resolved": resolved, "context": context,
         "corrections_applied": corrections, "escalations": escalations,
         "iteration": state.get("iteration", 1) + 1,
     }

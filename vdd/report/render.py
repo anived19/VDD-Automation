@@ -19,6 +19,7 @@ Context dict shape (`d`), unchanged from the original script:
     com_rows, poa_rows, poi_rows, aml_rows: list[(code, parameter, result)]
     extra_unlock: list[str]                        # subset of the 3 tags below
 """
+import html as _html
 import os
 import re
 
@@ -294,6 +295,62 @@ def build(d):
 
     head = HEAD.replace("KASHI ENTERPRISES &mdash; Seller Intelligence Report", d['firm'] + " &mdash; Seller Intelligence Report")
     return head + hdr + scoreband + prog + unlock + bodygrid + profile + hsn + findings + annex + ftr + '\n</div></body></html>'
+
+
+# ---------------------------------------------------------------- plain-text rendering
+def _text(fragment, span_sep=""):
+    """Collapse an HTML-escaped context value (which may carry inline pill/evidence
+    <span>s and &mdash;-style entities) to plain text. `span_sep` is inserted
+    where a <span> opened, so a code row's evidence sub-line reads
+    'headline -- evidence' instead of running the two together."""
+    s = str(fragment)
+    if span_sep:
+        s = re.sub(r'<span\b[^>]*>', span_sep, s)
+    s = re.sub(r'<[^>]+>', ' ', s)
+    s = _html.unescape(s)
+    return re.sub(r'\s+', ' ', s).strip(" -")
+
+
+def build_text(d):
+    """The same report as build(), as plain text -- for the LLM reviewer, which
+    reasons over the data and never the styling. Measured on a real Skandan
+    report: build()'s output was ~16k tokens with the <head> already stripped
+    (markup, inline styles, SVG, the unlock cards); this is a small fraction
+    of that for identical content. Every section build() shows the analyst is
+    here, in the same order, so a reviewer finding can name what the analyst
+    will actually see."""
+    lines = []
+    chips = []
+    for _, label in d.get("chips") or []:
+        label = _text(label)
+        chips.append(f"Location: {label[len('@LOC@'):]}" if label.startswith("@LOC@") else label)
+    lines += [f"# {_text(d['firm'])} -- Verified Seller Profile",
+              f"Legal Name: {_text(d['legal'])} | Report Date: {d['date']}",
+              "Status chips: " + " | ".join(chips),
+              "",
+              f"Finoscale Basic Score: {d['score']} / 100  "
+              f"(Compliance {d['com']}/25, Proof of Address {d['poa']}/10, "
+              f"Proof of Identity {d['poi']}/10, Legal/AML {d['aml']}/5). "
+              "On-Site Verification (20), 3B & 2B Analysis (25) and ITR Analysis (5) are Pending "
+              "-- not scored in v1, shown to the analyst as unlockable.",
+              "", "## Entity Details"]
+    lines += [f"- {k}: {_text(v)}" for k, v in d["entity"]]
+    lines += ["", "## Registration & Compliance IDs"]
+    lines += [f"- {k}: {_text(v)}" for k, v, _ in d["reg"]]
+    lines += ["", "## Business Profile", _text(d["profile"])]
+    lines += ["", f"## Declared Goods & Services (HSN) -- {len(d['hsn'])} row(s)"]
+    lines += [f"- {_text(c)}: {_text(desc)}" for c, desc in d["hsn"]] or ["(none)"]
+    lines += ["", "## Findings & Observations  ([OK] = confirmed, [!] = note/caution)"]
+    lines += [f"- [{'OK' if t == 'c' else '!'}] {_text(txt)}" for t, txt in d["findings"]] or ["(none)"]
+    lines += ["", "## Compliance & KYC Scoring Detail"]
+    for title, val, den, rows in (("COMPLIANCE", d["com"], 25, d["com_rows"]),
+                                  ("PROOF OF ADDRESS", d["poa"], 10, d["poa_rows"]),
+                                  ("PROOF OF IDENTITY", d["poi"], 10, d["poi_rows"]),
+                                  ("LEGAL / AML CHECK", d["aml"], 5, d["aml_rows"])):
+        lines.append(f"### {title} -- {val}/{den}")
+        lines += [f"- {c} {_text(p)}: {_text(r, span_sep=' -- ')}" for c, p, r in rows]
+    lines += ["### ON-SITE VERIFICATION / 3B & 2B ANALYSIS / ITR ANALYSIS -- Pending (not scored)"]
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------- render tight-height PDF

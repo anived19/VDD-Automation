@@ -83,26 +83,17 @@ def build_review_model(*, qwen_max_tokens: Optional[int] = None) -> Optional[Bas
         # validates the model field against that, not against any real
         # model registry.
         model_name = os.environ.get("QWEN_MODEL", "Qwen/Qwen3.8-27B")
-        # Qwen3.8 thinks by default: its <think>…</think> reasoning tokens count
-        # against max_tokens BEFORE the actual structured JSON output begins. The
-        # previous 2048-token cap was enough for a trivial single-finding test, but
-        # a real multi-document vendor review easily exhausts it on thinking alone,
-        # truncating the JSON and causing create_agent to return
-        # structured_response=None. 16384 gives ample room for thinking + a
-        # multi-finding ReviewReport -- but the server rejects
-        # prompt_tokens + max_tokens > --max-model-len outright, and a real report's
-        # prompt (system prompt + tool schemas + rendered HTML) is NOT guaranteed to
-        # leave 16384 tokens of headroom (confirmed: a 16385-token prompt overflowed
-        # a 32768 window by exactly 1 token). `qwen_max_tokens` lets the caller size
-        # this down against the actual prompt for the call; 16384 here is only the
-        # ceiling when no override is given. Thinking is also explicitly disabled --
-        # the structured output doesn't benefit from chain-of-thought reasoning
-        # tokens, and disabling it makes the output budget fully available for the
-        # JSON payload.
+        # Thinking is disabled: Qwen3.8's <think>…</think> tokens would count against
+        # max_tokens before the JSON starts, and the structured ReviewReport doesn't
+        # benefit from them. With thinking off the output IS the JSON, and real
+        # passes run ~0.6-1k tokens -- the caller (graph.py::_qwen_output_budget)
+        # sizes max_tokens against the exact prompt length for that pass, because
+        # the server rejects prompt_tokens + max_tokens > --max-model-len outright.
+        # The default here is only for callers that don't pass a budget.
         return init_chat_model(model_name, model_provider="openai",
                                 api_key=os.environ.get("QWEN_API_KEY", "EMPTY"),
                                 base_url=os.environ["QWEN_BASE_URL"],
-                                max_tokens=qwen_max_tokens if qwen_max_tokens is not None else 16384,
+                                max_tokens=qwen_max_tokens if qwen_max_tokens is not None else 4096,
                                 extra_body={"chat_template_kwargs": {"enable_thinking": False}})
     if provider == "openai":
         # No guessed default model name here (this codebase's own convention
