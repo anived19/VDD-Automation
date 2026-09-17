@@ -1,12 +1,20 @@
 """
 Provider-swappable chat model for the reviewer agent.
 
-Gemini (gemini-3.5-flash-lite via GEMINI_API_KEY) is the only tested path
-right now. The OpenAI branch exists so a future move to OpenAI in
-production is a key/env change, not a rewrite -- per the user's own plan
-("make it swappable depending on which key is active") -- but it is
-UNTESTED: no OpenAI key was available while building this, so treat it as
-unverified until it's actually run against a real key.
+Three providers:
+  - gemini  -- gemini-3.5-flash-lite via GEMINI_API_KEY (tested, the default
+               when only that key is present).
+  - openai  -- OPENAI_API_KEY + OPENAI_MODEL, Responses API with reasoning
+               summaries (tested 2026-09-16, gpt-5.6-luna).
+  - foundry -- an open-weight model (DeepSeek-V4-Pro, Kimi K3, ...) sold and
+               hosted by Microsoft Foundry in the customer's own Azure
+               subscription, reached through its OpenAI-compatible chat
+               completions endpoint. This is the data-residency path: the
+               model provider never sees a request, Microsoft does not train
+               on or share prompts/completions, and with a regional / Data
+               Zone deployment plus the modified abuse-monitoring exemption
+               nothing is stored. See .env.example for the deployment
+               checklist that makes those guarantees actually hold.
 
 Uses LangChain's provider-agnostic `init_chat_model`, which standardizes
 `api_key` as a constructor kwarg across every supported provider
@@ -15,6 +23,7 @@ know each provider's own key-parameter name.
 """
 from __future__ import annotations
 
+import json
 import os
 from typing import Optional
 
@@ -31,6 +40,10 @@ from langchain_core.rate_limiters import InMemoryRateLimiter
 _GEMINI_RATE_LIMITER = InMemoryRateLimiter(requests_per_second=12 / 60, check_every_n_seconds=0.1, max_bucket_size=1)
 
 
+def _foundry_configured() -> bool:
+    return bool(os.environ.get("FOUNDRY_ENDPOINT") and os.environ.get("FOUNDRY_API_KEY"))
+
+
 def select_provider() -> Optional[str]:
     """Which provider to use, or None if no usable key is configured --
     callers (vdd/pipeline.py) must treat None as 'skip the review step',
@@ -40,8 +53,15 @@ def select_provider() -> Optional[str]:
         return "gemini" if os.environ.get("GEMINI_API_KEY") else None
     if explicit == "openai":
         return "openai" if os.environ.get("OPENAI_API_KEY") else None
+    if explicit in ("foundry", "azure"):
+        return "foundry" if _foundry_configured() else None
     if explicit:
-        raise ValueError(f"Unrecognized LLM_PROVIDER={explicit!r} -- expected 'gemini' or 'openai'")
+        raise ValueError(f"Unrecognized LLM_PROVIDER={explicit!r} -- expected 'gemini', 'openai', or 'foundry'")
+    # A configured Foundry endpoint is a deliberate deployment decision (it
+    # only exists if someone set the resource up), so it outranks API keys that
+    # may simply still be sitting in .env from earlier testing.
+    if _foundry_configured():
+        return "foundry"
     if os.environ.get("GEMINI_API_KEY"):
         return "gemini"
     if os.environ.get("OPENAI_API_KEY"):
@@ -49,9 +69,40 @@ def select_provider() -> Optional[str]:
     return None
 
 
+FOUNDRY_MAX_OUTPUT_TOKENS_DEFAULT = 8192
+
+
+def foundry_max_output_tokens() -> int:
+    """Per-turn output cap for the Foundry model. A reasoning model's thinking
+    counts against it before the tool call / JSON starts, so it is deliberately
+    higher than a plain model needs (real ReviewReports run ~1k tokens)."""
+    return int(os.environ.get("FOUNDRY_MAX_OUTPUT_TOKENS", FOUNDRY_MAX_OUTPUT_TOKENS_DEFAULT))
+
+
 def build_review_model() -> Optional[BaseChatModel]:
     """Returns None if no usable LLM key is configured."""
     provider = select_provider()
+    if provider == "foundry":
+        deployment = os.environ.get("FOUNDRY_DEPLOYMENT")
+        if not deployment:
+            raise ValueError("FOUNDRY_ENDPOINT/FOUNDRY_API_KEY are set but FOUNDRY_DEPLOYMENT is not -- set it to "
+                              "the deployment name from the Foundry portal (e.g. DeepSeek-V4-Pro).")
+        key = os.environ["FOUNDRY_API_KEY"]
+        # Azure authenticates with an `api-key` header; the OpenAI client only
+        # knows `Authorization: Bearer`. Sending both is harmless and covers the
+        # /openai/v1 route (accepts either) and the Model Inference route
+        # (api-key only). FOUNDRY_API_VERSION is only needed by the latter.
+        kwargs: dict = {"api_key": key, "base_url": os.environ["FOUNDRY_ENDPOINT"].rstrip("/"),
+                        "default_headers": {"api-key": key}, "max_tokens": foundry_max_output_tokens()}
+        if os.environ.get("FOUNDRY_API_VERSION"):
+            kwargs["default_query"] = {"api-version": os.environ["FOUNDRY_API_VERSION"]}
+        # Model-specific request fields the OpenAI schema has no name for
+        # (DeepSeek / Kimi thinking controls, etc.) -- taken verbatim from the
+        # model card, never guessed here. JSON object, e.g. {"thinking": {"type": "enabled"}}.
+        extra = os.environ.get("FOUNDRY_EXTRA_BODY", "").strip()
+        if extra:
+            kwargs["extra_body"] = json.loads(extra)
+        return init_chat_model(deployment, model_provider="openai", **kwargs)
     if provider == "gemini":
         model_name = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
         # include_thoughts=True surfaces Gemini's reasoning summary in the response

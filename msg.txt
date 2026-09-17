@@ -1,0 +1,61 @@
+Microsoft Foundry provider, web search off by default, bounded loop with failure transcripts
+
+Adds a third reviewer provider for the data-residency path: an open-weight
+model (DeepSeek-V4-Pro, Kimi K3, ...) sold and hosted by Microsoft Foundry
+inside our own Azure subscription, reached through its OpenAI-compatible
+chat-completions endpoint. The model's maker never sees a request, and
+Microsoft does not train on or share prompts/completions; with a regional
+or Data Zone deployment plus the modified abuse-monitoring exemption,
+nothing is stored. .env.example carries the five-step deployment checklist
+those guarantees depend on.
+
+vdd/review/model.py
+- LLM_PROVIDER=foundry with FOUNDRY_ENDPOINT / FOUNDRY_API_KEY /
+  FOUNDRY_DEPLOYMENT, optional FOUNDRY_API_VERSION (Model Inference route),
+  FOUNDRY_MAX_OUTPUT_TOKENS (8192; a reasoning model's thinking counts
+  against it) and FOUNDRY_EXTRA_BODY (JSON pass-through for model-card
+  fields such as thinking controls -- nothing guessed in code).
+- Sends Azure's `api-key` header alongside the bearer token so both the
+  /openai/v1 and Model Inference routes authenticate.
+- A configured Foundry endpoint outranks Gemini/Op
+  LLM_PROVIDER still overrides.
+
+vdd/review/graph.py
+- Foundry only: bounded loop. A "Tool budget" section in the user message,
+  _FinishWithReport middleware that withholds every tool except ReviewReport
+  on the last allowed call (FOUNDRY_MAX_MODEL_CALLS, default 8), and a
+  ModelCallLimitMiddleware backstop at +2. create_agent binds every turn
+  with tool_choice="any" when structured output is requested, so calling
+  ReviewReport is the only exit -- a small self-hosted model (QwenTest
+  branch, 2026-09-16) never took it unprompted. Gemini/OpenAI are untouched.
+- All providers: the agent is streamed instead of
+  raises or ends without a ReviewReport logs a per-message transcript table
+  and writes <VENDOR>_review_failure_pass<N>.json
+  field, passed from pipeline.py) instead of discarding the evidence.
+
+vdd/review/tools.py
+- web_search (Tavily) is only offered when REVIEW_WEB_SEARCH=1. The model
+  composes the query itself and put a PAN and a premises address into it in
+  real traces (out/MVIKAS_review_trace.json, out/S
+  Tavily is not a KYC data source. Across 22 traces it was used 0.5x per run
+  and every 4/4-recall run got there without it. Azure's Grounding with Bing
+  Search is not a substitute: Microsoft's docs pla
+  compliance boundary (DPA does not apply).
+
+run_vendor.py: vdd.review logs at INFO so the forced-finish and transcript
+lines are visible. README/.env.example: provider docs, deployment
+checklist, evaluation bar.
+
+Tests: 73 (was 63). New tests/test_review_foundry.py covers provider
+precedence, Azure header/extra-body construction,
+tool-happy fake model forced to submit on call 5, a model that ignores the
+forced finish leaving a transcript within 7 calls, and that Gemini/OpenAI
+receive neither the budget section nor the middlew
+test_wrapping_keeps_tool_schemas_identical now enables REVIEW_WEB_SEARCH
+explicitly.
+
+Verified with a real Gemini run on this branch (Skandan, 1 pass, approved,
+RECALL 4/4, 19,644 in / 6,055 out): the date_of_registration correction
+now renders -- "GST Since 02/01/2024" in the delivered report, where every
+earlier run left N/A. Foundry itself is unexercise
+exists.

@@ -7,6 +7,7 @@ Usage:
     python run_vendor.py --docs "..." --out out/ --no-review   # skip the LLM review loop
 """
 import argparse
+import logging
 import os
 import sys
 
@@ -16,6 +17,11 @@ from vdd.finoscale_api.client import FinoscaleClient
 from vdd.pipeline import run_vendor
 
 load_dotenv()
+# The review layer's INFO lines (forced-finish, call budget) and the failure
+# transcript are the evidence needed to judge a new model; everything else
+# stays at WARNING so third-party libraries don't flood the output.
+logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s", stream=sys.stderr)
+logging.getLogger("vdd.review").setLevel(logging.INFO)
 
 
 def main():

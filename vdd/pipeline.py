@@ -544,7 +544,7 @@ def _run_review(computed: VendorComputation, client: Optional[FinoscaleClient],
         return {"context": computed.context}
 
     if provider is None:
-        warnings.append("LLM review skipped -- no GEMINI_API_KEY/OPENAI_API_KEY configured.")
+        warnings.append("LLM review skipped -- no GEMINI_API_KEY/OPENAI_API_KEY/FOUNDRY_ENDPOINT configured.")
         return {"context": computed.context}
 
     try:
@@ -555,6 +555,7 @@ def _run_review(computed: VendorComputation, client: Optional[FinoscaleClient],
         init_state = {
             "vendor_name": computed.vendor_name,
             "scoring_model_path": scoring_model_path,
+            "out_dir": out_dir,
             "client": client,
             "entity": computed.entity,
             "resolved": computed.resolved,

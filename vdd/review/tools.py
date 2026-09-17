@@ -39,6 +39,17 @@ _MAX_TOOL_RESULT_CHARS = 6000
 _WEB_SNIPPET_CHARS = 700
 
 
+def web_search_enabled() -> bool:
+    """REVIEW_WEB_SEARCH=1 offers the Tavily `web_search` tool to the reviewer.
+    Off by default: the model writes the query text itself and has been seen
+    putting a PAN and a premises address into it (out/MVIKAS_review_trace.json,
+    out/SKANDAN2_review_trace.json), which then leaves for a third party that
+    is not a KYC data source. Across 22 traces it was used 0.5x per run, and
+    both of the best Gemini runs (4/4 recall, approved) never called it --
+    the dedicated tools already cover what the searches were reaching for."""
+    return os.environ.get("REVIEW_WEB_SEARCH", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _cap(fn, seen: dict):
     """Two guards on every tool result, since each one is appended to the
     agent's context for the rest of the pass:
@@ -214,10 +225,9 @@ def make_tools(client: Optional[FinoscaleClient]) -> list:
     def web_search(query: str) -> list[dict]:
         """Open-ended web search for anything not covered by the tools
         above (e.g. corroborating a business address or claim). Backed by
-        Tavily today; kept as a stable interface so a future swap to
-        OpenAI's hosted web-search tool (once this project's underlying LLM
-        moves to OpenAI in production) changes only this function's
-        implementation, not the reviewer's tool-calling contract."""
+        Tavily; kept as a stable interface so a different backend changes
+        only this function's implementation, not the reviewer's
+        tool-calling contract."""
         api_key = os.environ.get("TAVILY_API_KEY")
         if not api_key:
             return [{"error": "no TAVILY_API_KEY configured for this run"}]
@@ -228,6 +238,9 @@ def make_tools(client: Optional[FinoscaleClient]) -> list:
                  "content": (r.get("content") or "")[:_WEB_SNIPPET_CHARS]}
                 for r in response.get("results", [])]
 
+    tools = [recheck_sanctions, recheck_pep, recheck_drt_sarfaesi, recheck_gstin_live,
+             recheck_bank_verification, recheck_zigram_screening]
+    if web_search_enabled():
+        tools.append(web_search)
     seen: dict = {}
-    return [_cap(t, seen) for t in (recheck_sanctions, recheck_pep, recheck_drt_sarfaesi, recheck_gstin_live,
-                                    recheck_bank_verification, recheck_zigram_screening, web_search)]
+    return [_cap(t, seen) for t in tools]

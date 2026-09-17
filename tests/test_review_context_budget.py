@@ -139,10 +139,11 @@ def test_seen_is_per_make_tools_call():
     assert "repeated_call" not in b("33AAAAA0000A1Z5")
 
 
-def test_wrapping_keeps_tool_schemas_identical():
+def test_wrapping_keeps_tool_schemas_identical(monkeypatch):
     """functools.wraps sets __wrapped__, which inspect.signature follows, so
     create_agent infers the exact same schema from the wrapped tool as from
     the plain function."""
+    monkeypatch.setenv("REVIEW_WEB_SEARCH", "1")  # off by default; enabled here to check its schema too
     expected = {
         "recheck_sanctions": ["entity_name"],
         "recheck_pep": ["person_names"],
