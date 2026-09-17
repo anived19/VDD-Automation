@@ -27,7 +27,7 @@ from langchain.agents import create_agent
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
-from vdd.report.build_context import build_context
+from vdd.report.build_context import REPORT_ENTITY_FIELDS, build_context
 from vdd.report.render import build_text
 from vdd.resolve.resolvers import Resolved
 from vdd.review.model import build_review_model, select_provider
@@ -61,6 +61,37 @@ def _format_resolved(resolved: dict[str, Any]) -> str:
     return "\n".join(lines) or "(none)"
 
 
+def _normalise_parameter_ids(findings: list[dict], state: ReviewState) -> None:
+    """Map a finding's parameter_id from the report's display code (POA-01) to
+    the scoring-model parameterId (addr_ownership_type) in place. Observed
+    2026-09-16 with Gemini: one pass named all four findings by display code
+    even though the schema asks for the parameterId -- apply_corrections
+    would then find no such key in `resolved` and silently downgrade a
+    verified correction to an escalation, and compare_reviews.py's recall
+    reads 0/4 for a pass that found everything. Case-insensitive; an id that
+    is already a parameterId (or unknown) is left alone."""
+    code_ids = {k.upper(): v for k, v in (state.get("context") or {}).get("code_ids", {}).items()}
+    for f in findings:
+        pid = f.get("parameter_id")
+        if pid and str(pid).strip().upper() in code_ids:
+            f["parameter_id"] = code_ids[str(pid).strip().upper()]
+
+
+def _format_entity_fields(entity: dict[str, Any]) -> str:
+    """The entity keys the report reads, with their current values -- the only
+    valid `field` targets for a correction. A key the extractors never set
+    is shown as None so the reviewer can see what the report is missing."""
+    lines = []
+    for k in REPORT_ENTITY_FIELDS:
+        v = entity.get(k)
+        if isinstance(v, (list, tuple, dict)):
+            shown = f"<{type(v).__name__} of {len(v)}>"
+        else:
+            shown = repr(v)[:100] if v is not None else "None  (report shows N/A / Not Available)"
+        lines.append(f"- {k}: {shown}")
+    return "\n".join(lines)
+
+
 def _format_history(passes: list[dict]) -> str:
     lines = []
     for i, p in enumerate(passes, start=1):
@@ -84,6 +115,9 @@ def _build_user_message(state: ReviewState) -> str:
         "## Cross-check items (the pipeline's own flagged judgment calls / gaps)",
         "\n".join(f"- {i}" for i in state.get("cross_check_items", [])) or "(none)",
         "",
+        "## Entity fields the report reads (the ONLY valid `field` values for a correction -> current value)",
+        _format_entity_fields(state.get("entity", {})),
+        "",
         "## The report as the analyst will see it (plain-text rendering)",
         build_text(state.get("context", {})),
     ]
@@ -105,6 +139,7 @@ def llm_review(state: ReviewState) -> dict:
     result = agent.invoke({"messages": [{"role": "user", "content": user_msg}]})
     report: ReviewReport = result["structured_response"]
     report_dict = report.model_dump()
+    _normalise_parameter_ids(report_dict["findings"], state)
 
     return {
         "findings": report_dict["findings"],
@@ -135,10 +170,16 @@ def apply_corrections(state: ReviewState) -> dict:
                 resolved[pid] = Resolved.ok(f.get("proposed_value"), source="llm-review",
                                              note=f.get("proposed_note", ""))
                 corrections.append(record)
-            elif field:
+            elif field in REPORT_ENTITY_FIELDS:
                 record["before"] = {"value": entity.get(field)}
                 entity[field] = f.get("proposed_value")
                 corrections.append(record)
+            elif field:
+                # Setting an arbitrary key on `entity` would be logged as a
+                # correction while the rendered report stays exactly the same.
+                record["reason"] = (f"action=='correct' names entity field {field!r}, which the report does not "
+                                    f"read -- escalated instead (valid: {', '.join(REPORT_ENTITY_FIELDS)})")
+                escalations.append(record)
             else:
                 record["reason"] = "action=='correct' but no matching parameter_id/field on this report -- escalated instead"
                 escalations.append(record)

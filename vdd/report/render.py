@@ -342,13 +342,17 @@ def build_text(d):
     lines += [f"- {_text(c)}: {_text(desc)}" for c, desc in d["hsn"]] or ["(none)"]
     lines += ["", "## Findings & Observations  ([OK] = confirmed, [!] = note/caution)"]
     lines += [f"- [{'OK' if t == 'c' else '!'}] {_text(txt)}" for t, txt in d["findings"]] or ["(none)"]
-    lines += ["", "## Compliance & KYC Scoring Detail"]
+    # The analyst's report shows only the display code (POA-01); the reviewer
+    # must name the scoring-model parameterId (addr_ownership_type) in its
+    # findings, so print both -- see build_context._code_ids.
+    ids = d.get("code_ids") or {}
+    lines += ["", "## Compliance & KYC Scoring Detail  (code [parameterId] name: result -- evidence)"]
     for title, val, den, rows in (("COMPLIANCE", d["com"], 25, d["com_rows"]),
                                   ("PROOF OF ADDRESS", d["poa"], 10, d["poa_rows"]),
                                   ("PROOF OF IDENTITY", d["poi"], 10, d["poi_rows"]),
                                   ("LEGAL / AML CHECK", d["aml"], 5, d["aml_rows"])):
         lines.append(f"### {title} -- {val}/{den}")
-        lines += [f"- {c} {_text(p)}: {_text(r, span_sep=' -- ')}" for c, p, r in rows]
+        lines += [f"- {c} [{ids.get(c, '?')}] {_text(p)}: {_text(r, span_sep=' -- ')}" for c, p, r in rows]
     lines += ["### ON-SITE VERIFICATION / 3B & 2B ANALYSIS / ITR ANALYSIS -- Pending (not scored)"]
     return "\n".join(lines)
 

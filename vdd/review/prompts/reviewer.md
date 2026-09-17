@@ -32,10 +32,18 @@ definitive, cited evidence) or escalate them for the analyst.
   and must never ask for, any document image or file. If something can
   only be resolved by re-reading a source document, escalate it instead
   of guessing.
-- `verdict="approved"` means you are confident an additional tool call
-  would not change your assessment of this report. Do not approve just
-  because you have run out of ideas for what to check -- if you have any
-  doubt, request another pass instead.
+- `verdict="approved"` means the report is ready for the analyst: every
+  correction you could verify has been applied, and everything you could
+  not verify has been escalated. Escalations do NOT block approval -- the
+  analyst resolves those, not another pass, and an item no tool can settle
+  (a document that must be re-read, a source that is down) will not be
+  settled next pass either. Request another pass only when you have a
+  specific tool call in mind that could still turn an escalation into a
+  verified correction, or when a correction you made this pass needs to be
+  re-read in the revised report.
+- An entity-field correction must name one of the keys listed under
+  "Entity fields the report reads" -- that list is exactly what the report
+  renders; any other field name cannot be applied.
 
 ## Pass structure
 
@@ -51,3 +59,5 @@ every correction applied so far -- it is never the stale original.
   sections you approved last time -- re-verify previously-approved claims
   with fresh tool calls wherever you do not yet have a definitive, citable
   answer for them, not just the rows that changed since last pass.
+  Escalations already recorded in the history are on the analyst's list --
+  do not re-raise one unless you now have new evidence for it.

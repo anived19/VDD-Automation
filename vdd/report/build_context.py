@@ -22,6 +22,21 @@ _CATEGORY_CODE_PREFIX = {
     "legal_aml": "AML",
 }
 
+# Every `entity` key this module reads. The LLM review loop only accepts an
+# entity-field correction naming one of these -- a correction to any other
+# key would be recorded as applied while changing nothing on the report
+# (observed 2026-09-16: the reviewer wrote field='gst_since' for the "GST
+# Since" row, which reads date_of_registration). tests/ asserts this tuple
+# matches the entity.get()/entity[] calls in this file, so it can't drift.
+REPORT_ENTITY_FIELDS = (
+    "address", "bank_name", "bank_name_msme", "constitution", "date_of_incorporation",
+    "date_of_registration", "declared_hsn", "electricity_bill_activity", "enterprise_type",
+    "gst_annual_aggregate_turnover", "gst_annual_aggregate_turnover_year",
+    "gst_nature_of_business_activity", "gstin", "legal_name", "major_activity",
+    "nature_of_business", "nic_5_code", "nic_5_description", "pan", "partners", "state",
+    "taxpayer_type", "trade_name", "udyam_number",
+)
+
 _ENTITY_TYPE_LABEL = {
     "pvt_public_listed": "Private/Public Limited",
     "llp": "LLP",
@@ -70,6 +85,14 @@ def _code_rows(cat: CategoryScore) -> list:
             result += f'<span style="{_EVIDENCE_STYLE}">{esc(detail)}</span>'
         rows.append((code, esc(p.parameter_name), result))
     return rows
+
+
+def _code_ids(*cats: CategoryScore) -> dict:
+    """{display code -> scoring-model parameterId}, numbered exactly as
+    _code_rows numbers them. The LLM reviewer needs this: the report shows
+    'POA-01', the review loop patches `resolved['addr_ownership_type']`."""
+    return {f"{_CATEGORY_CODE_PREFIX[cat.category_id]}-{i:02d}": p.parameter_id
+            for cat in cats for i, p in enumerate(cat.params, start=1)}
 
 
 def _cat_by_id(result: ScoreResult, cat_id: str) -> CategoryScore:
@@ -431,5 +454,6 @@ def build_context(entity: dict, result: ScoreResult, report_date: str = None) ->
         "findings": _findings(result, entity),
         "com_rows": _code_rows(com), "poa_rows": _code_rows(poa),
         "poi_rows": _code_rows(poi), "aml_rows": _code_rows(aml),
+        "code_ids": _code_ids(com, poa, poi, aml),
         "extra_unlock": extra_unlock,
     }

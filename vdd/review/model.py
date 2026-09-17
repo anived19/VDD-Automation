@@ -75,5 +75,18 @@ def build_review_model() -> Optional[BaseChatModel]:
         if not model_name:
             raise ValueError("OPENAI_API_KEY is set but OPENAI_MODEL is not -- set it explicitly "
                               "(this path is untested; pick a current model deliberately, don't guess).")
-        return init_chat_model(model_name, model_provider="openai", api_key=os.environ["OPENAI_API_KEY"])
+        # Reasoning summaries are the only view OpenAI gives of a reasoning
+        # model's thinking (the raw chain-of-thought is never returned) and
+        # they have to be asked for: `reasoning={"summary": "auto"}` routes the
+        # call through the Responses API, and output_version="responses/v1"
+        # puts them in message.content as {"type": "reasoning", "summary":
+        # [...]} blocks -- which langchain-core's `content_blocks` normalises
+        # to the same shape as Gemini's thinking blocks, so trace.py logs both
+        # providers' thoughts through one code path. Effort defaults to the
+        # model's own default ("medium"); "none" would switch thinking off.
+        # Requires a verified OpenAI org -- otherwise the API answers 400
+        # "Your organization must be verified to generate reasoning summaries".
+        effort = os.environ.get("OPENAI_REASONING_EFFORT", "medium")
+        return init_chat_model(model_name, model_provider="openai", api_key=os.environ["OPENAI_API_KEY"],
+                                reasoning={"effort": effort, "summary": "auto"}, output_version="responses/v1")
     return None

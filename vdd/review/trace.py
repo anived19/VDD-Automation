@@ -22,26 +22,27 @@ def _serialize_message(m: Any) -> dict[str, Any]:
     cls = m.__class__.__name__
     if cls == "AIMessage":
         tool_calls = getattr(m, "tool_calls", None) or []
-        content = m.content
-        text, thinking = None, None
-        if isinstance(content, str):
-            text = content
-        elif isinstance(content, list):
-            # Gemini (include_thoughts=True) returns content as a list of blocks --
-            # {"type": "thinking", "thinking": "..."} for the reasoning summary,
-            # {"type": "text", "text": "..."} for the actual reply -- instead of a
-            # plain string. Split them out rather than dropping the whole thing.
-            text_parts, thinking_parts = [], []
-            for block in content:
-                if isinstance(block, str):
-                    text_parts.append(block)
-                elif isinstance(block, dict):
-                    if block.get("type") == "thinking":
-                        thinking_parts.append(block.get("thinking") or "")
-                    elif block.get("type") == "text":
-                        text_parts.append(block.get("text") or "")
-            text = "\n".join(p for p in text_parts if p) or None
-            thinking = "\n".join(p for p in thinking_parts if p) or None
+        # `content_blocks` is langchain-core's provider-normalised view of the
+        # content: Gemini's {"type": "thinking", "thinking": ...} blocks
+        # (include_thoughts=True) and OpenAI's {"type": "reasoning", "summary":
+        # [...]} items (reasoning={"summary": "auto"}, output_version=
+        # "responses/v1") both come out as {"type": "reasoning", "reasoning":
+        # "..."}, and a plain-string reply as one "text" block. The translation
+        # keys off response_metadata["model_provider"]; a block it can't place
+        # is wrapped as "non_standard", so Gemini's raw shape is still handled
+        # for a message that lacks that metadata.
+        text_parts, thinking_parts = [], []
+        for block in m.content_blocks:
+            kind = block.get("type")
+            if kind == "reasoning":
+                thinking_parts.append(block.get("reasoning") or "")
+            elif kind == "text":
+                text_parts.append(block.get("text") or "")
+            elif kind == "non_standard" and isinstance(block.get("value"), dict) \
+                    and block["value"].get("type") == "thinking":
+                thinking_parts.append(block["value"].get("thinking") or "")
+        text = "\n".join(p for p in text_parts if p) or None
+        thinking = "\n".join(p for p in thinking_parts if p) or None
         return {"type": "ai", "content": text, "thinking": thinking,
                 "tool_calls": [{"name": tc.get("name"), "args": tc.get("args")} for tc in tool_calls]}
     if cls == "ToolMessage":
@@ -67,30 +68,37 @@ def _usage_from_message(m: Any) -> Optional[dict[str, int]]:
     u = getattr(m, "usage_metadata", None)
     if not u:
         return None
+    # Providers that expose reasoning (OpenAI's completion_tokens_details.reasoning_tokens,
+    # Gemini's thoughts) land here via langchain's output_token_details -- reasoning is
+    # billed as output, so this is how much of output_tokens was thinking.
+    details = u.get("output_token_details") or {}
     return {"input_tokens": int(u.get("input_tokens") or 0),
             "output_tokens": int(u.get("output_tokens") or 0),
-            "total_tokens": int(u.get("total_tokens") or 0)}
+            "total_tokens": int(u.get("total_tokens") or 0),
+            "reasoning_tokens": int(details.get("reasoning") or 0)}
+
+
+_USAGE_KEYS = ("input_tokens", "output_tokens", "total_tokens", "reasoning_tokens")
 
 
 def extract_pass_usage(messages: list[Any]) -> dict[str, int]:
     """Sum token usage across every LLM call made during one llm_review pass --
     a ReAct pass invokes the model once per tool-calling round, not just once,
     so this sums usage_metadata across every AIMessage in that pass."""
-    totals = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "llm_call_count": 0}
+    totals = {k: 0 for k in _USAGE_KEYS} | {"llm_call_count": 0}
     for m in messages:
         u = _usage_from_message(m)
         if u is None:
             continue
-        totals["input_tokens"] += u["input_tokens"]
-        totals["output_tokens"] += u["output_tokens"]
-        totals["total_tokens"] += u["total_tokens"]
+        for k in _USAGE_KEYS:
+            totals[k] += u[k]
         totals["llm_call_count"] += 1
     return totals
 
 
 def summarize_usage(pass_usage: list[dict[str, int]]) -> dict[str, int]:
     """Grand total across every pass of one review run."""
-    totals = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "llm_call_count": 0}
+    totals = {k: 0 for k in _USAGE_KEYS} | {"llm_call_count": 0}
     for p in pass_usage:
         for k in totals:
             totals[k] += p.get(k, 0)

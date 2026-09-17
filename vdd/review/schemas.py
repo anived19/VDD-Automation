@@ -9,12 +9,15 @@ from pydantic import BaseModel, Field
 class Finding(BaseModel):
     parameter_id: Optional[str] = Field(
         default=None,
-        description="Scoring-model parameterId this finding is about (e.g. 'com_bank_verification'), if it's "
-                    "a scored parameter.")
+        description="Scoring-model parameterId this finding is about, exactly as listed under 'Resolved "
+                    "parameter values' and shown in [brackets] on the report's scoring rows (e.g. "
+                    "'com_bank_verification') -- never the display code such as 'COM-07'.")
     field: Optional[str] = Field(
         default=None,
-        description="Non-scored entity/display field this finding is about (e.g. 'nic_5_description'), if it "
-                    "isn't a scored parameter.")
+        description="Non-scored entity/display field this finding is about, if it isn't a scored parameter. "
+                    "Must be one of the keys listed under 'Entity fields the report reads' in the message "
+                    "(e.g. 'date_of_registration' for the 'GST Since' row) -- a correction naming any other "
+                    "field cannot be applied.")
     issue: str = Field(description="What looks wrong or under-verified, in plain language.")
     severity: Literal["low", "medium", "high"] = "medium"
     proposed_value: Optional[Any] = Field(
@@ -36,9 +39,11 @@ class Finding(BaseModel):
 class ReviewReport(BaseModel):
     findings: list[Finding] = Field(default_factory=list)
     verdict: Literal["approved", "needs_another_pass"] = Field(
-        description="Your own judgment on whether this report is ready for the analyst. 'approved' means "
-                    "you're confident an additional tool call would not change your assessment -- don't "
-                    "approve just because you've run out of ideas; if in doubt, request another pass.")
+        description="'approved' = ready for the analyst: every correction you could verify has been applied "
+                    "and everything else has been escalated. Escalations do NOT block approval -- the analyst "
+                    "resolves them, not another pass. 'needs_another_pass' only if you still have a specific "
+                    "tool call in mind that could turn an escalation into a verified correction, or a "
+                    "correction you made this pass needs to be re-read in the revised report.")
     thoroughness_note: str = Field(
         description="What depth of scrutiny you actually applied this pass, and -- if verdict is "
                     "'needs_another_pass' -- specifically what you still want to dig into next pass.")

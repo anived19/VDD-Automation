@@ -36,6 +36,7 @@ def _minimal_context() -> dict:
         "poa_rows": [("A1", "Address Ownership", "Rented")],
         "poi_rows": [("I1", "PAN Active", "Yes")],
         "aml_rows": [("L1", "Sanctions", "Clear")],
+        "code_ids": {"C1": "com_gstin_active", "A1": "addr_ownership_type"},   # I1/L1 deliberately unmapped
         "extra_unlock": [],
     }
 
@@ -64,10 +65,40 @@ def test_build_text_collapses_markup_and_keeps_evidence_sub_line():
     assert "<" not in txt and "&amp;" not in txt and "&mdash;" not in txt
     assert "Location: Coimbatore, Tamil Nadu" in txt          # @LOC@ chip prefix translated
     assert "Makes widgets — since 2019." in txt               # entity unescaped, tags dropped
-    assert "- C1 GSTIN Active: Yes -- Active -- Ongrid fetch-detailed: status=Active" in txt
+    assert "- C1 [com_gstin_active] GSTIN Active: Yes -- Active -- Ongrid fetch-detailed: status=Active" in txt
+    assert "- I1 [?] PAN Active: Yes" in txt                    # unmapped code is visible, not a crash
     assert "- [OK] GST registration is active." in txt and "- [!] Bank account not verified." in txt
     # The whole point: same content, a fraction of the size the HTML was.
     assert len(txt) * 4 < len(build(_minimal_context()))
+
+
+def test_build_text_survives_a_context_without_code_ids():
+    ctx = _minimal_context(); del ctx["code_ids"]
+    assert "- A1 [?] Address Ownership: Rented" in build_text(ctx)
+
+
+def test_build_context_code_ids_follow_the_display_numbering():
+    from vdd.report.build_context import _code_ids
+    from vdd.score.engine import CategoryScore, ParamScore
+    def ps(pid): return ParamScore(parameter_id=pid, parameter_name=pid, value=1, matched_condition="x",
+                                    assigned_score=1, max_score=1)
+    com = CategoryScore(category_id="compliance", category_name="C", earned=2, max_score=2,
+                        params=[ps("com_gstin_active"), ps("com_bank_verification")])
+    poa = CategoryScore(category_id="proof_of_address", category_name="A", earned=1, max_score=1,
+                        params=[ps("addr_ownership_type")])
+    assert _code_ids(com, poa) == {"COM-01": "com_gstin_active", "COM-02": "com_bank_verification",
+                                   "POA-01": "addr_ownership_type"}
+
+
+def test_display_codes_in_findings_are_normalised_to_parameter_ids():
+    from vdd.review.graph import _normalise_parameter_ids
+    state = {"context": {"code_ids": {"POA-01": "addr_ownership_type", "COM-07": "com_bank_verification"}}}
+    findings = [{"parameter_id": "POA-01"}, {"parameter_id": " com-07 "}, {"parameter_id": "ident_pan_active"},
+                {"parameter_id": "XYZ-99"}, {"parameter_id": None, "field": "nic_5_description"}]
+    _normalise_parameter_ids(findings, state)
+    assert [f["parameter_id"] for f in findings] == ["addr_ownership_type", "com_bank_verification",
+                                                     "ident_pan_active", "XYZ-99", None]
+    _normalise_parameter_ids([{"parameter_id": "POA-01"}], {})          # no context at all -> no crash
 
 
 def test_repeated_identical_tool_call_returns_pointer_not_payload():
