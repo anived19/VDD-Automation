@@ -185,7 +185,7 @@ def write_review_workbook(path: str, *, vendor_name: str, entity: dict, resolved
                           unresolved_fields: list = (), missing_documents: list = (), api_errors: list = (),
                           warnings: list = (), llm_findings: list = (), llm_corrections: list = (),
                           review_summary: str = "", report_date: Optional[str] = None,
-                          audit_rows: list = (), analyst_name: str = "") -> str:
+                          audit_rows: list = (), analyst_name: str = "", document_reads: list = ()) -> str:
     """Write the workbook. `resolved` is the state the report was rendered from
     (post-LLM-review); `original_resolved` the pre-review deterministic state,
     used to show what the LLM changed and to detect stale overrides later."""
@@ -311,7 +311,7 @@ def write_review_workbook(path: str, *, vendor_name: str, entity: dict, resolved
 
     _write_choices(wb, specs)
     _write_entity(wb, entity)
-    _write_documents(wb, docs)
+    _write_documents(wb, docs, list(document_reads))
     _write_flags(wb, cross_check_items, unresolved_fields, missing_documents, api_errors, warnings,
                  llm_findings, llm_corrections)
     _write_audit(wb, audit_rows)
@@ -376,14 +376,17 @@ def _write_entity(wb: Workbook, entity: dict) -> None:
     ws.protection.formatColumns = False
 
 
-def _write_documents(wb: Workbook, docs: Optional[ClassifiedDocs]) -> None:
+def _write_documents(wb: Workbook, docs: Optional[ClassifiedDocs], reads: Optional[list] = None) -> None:
     ws = wb.create_sheet(S_DOCS)
-    ws["A1"] = ("Each file and the document type the system assigned. To correct one, pick the right type under "
-                "'Correct type' ('ignore' = not a KYC document). Applied when the sheet is submitted.")
+    ws["A1"] = ("Each file, the document type the system assigned, and how well it was read. To correct a type, "
+                "pick the right one under 'Correct type' ('ignore' = not a KYC document). Applied when the sheet "
+                "is submitted. A POOR/PARTIAL read lists the fields that could not be recovered -- re-scan or "
+                "re-upload if they matter.")
     ws["A1"].font = _FONT_MUTED
-    for c, h in enumerate(["File", "Detected type", "Correct type", "Note"], start=1):
+    for c, h in enumerate(["File", "Detected type", "Correct type", "Note", "Read quality", "Read via", "Missing fields"], start=1):
         ws.cell(row=2, column=c, value=h)
-    _style_header(ws, 2, 4)
+    _style_header(ws, 2, 7)
+    quality = {r.name: r for r in (reads or [])}
     rows = []
     if docs is not None:
         for doc_type, paths in docs.by_type.items():
@@ -403,8 +406,20 @@ def _write_documents(wb: Workbook, docs: Optional[ClassifiedDocs]) -> None:
         for c in (3, 4):
             _input_cell(ws.cell(row=row, column=c))
         dv.add(f"C{row}")
+        r = quality.get(fname)
+        if r is not None:
+            q = ws.cell(row=row, column=5, value=r.quality.upper())
+            q.font = Font(name=FONT, size=10, bold=r.quality != "read",
+                          color={"read": "1E7F4F", "partial": "B7791F", "poor": "B42318", "unreadable": "B42318"}[r.quality])
+            ws.cell(row=row, column=6, value=r.method).font = _FONT_BODY
+            # For a file that could not be read at all, the reason is more
+            # useful than a list of every field it would have carried.
+            detail = r.reason if (r.quality == "unreadable" and r.reason) else ", ".join(r.missing)
+            ws.cell(row=row, column=7, value=detail).font = _FONT_BODY
+        elif dtype == "unmatched":
+            ws.cell(row=row, column=5, value="UNMATCHED").font = Font(name=FONT, size=10, bold=True, color="B7791F")
         row += 1
-    for col, w in zip("ABCD", (60, 22, 22, 40)):
+    for col, w in zip("ABCDEFG", (60, 22, 22, 40, 13, 16, 40)):
         ws.column_dimensions[col].width = w
     ws.protection.sheet = True
     ws.protection.formatColumns = False

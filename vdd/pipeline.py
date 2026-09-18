@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 from vdd.extract.classify import classify_folder, classify_content, ClassifiedDocs
+from vdd.extract.consistency import DocumentRead, check_consistency
 from vdd.extract.ocr import extract_text, detect_diagonal_strike
 from vdd.extract.parsers import parse_document
 from vdd.finoscale_api.client import FinoscaleClient, FinoscaleAPIError
@@ -98,6 +99,10 @@ class VendorRunResult:
     # The analyst review workbook (vdd/review_sheet.py) written next to the
     # report -- the file an analyst edits and sends back to finalise_vendor.
     sheet_path: Optional[str] = None
+    # Per-document read quality (vdd/extract/consistency.py): method, quality
+    # and the expected fields that were not recovered. For the webapp panel
+    # and the workbook's Documents sheet.
+    document_reads: List["DocumentRead"] = field(default_factory=list)
     # {"input_tokens", "output_tokens", "total_tokens", "llm_call_count"} summed
     # across every review pass -- None when review didn't run (see _run_review).
     token_usage: Optional[dict] = None
@@ -121,6 +126,7 @@ class VendorComputation:
     cross_check_items: List[str]
     api_errors: List[str]
     warnings: List[str]
+    document_reads: List["DocumentRead"] = field(default_factory=list)
 
 
 # Judgment-call / documentation-gap markers already used deliberately throughout
@@ -251,7 +257,11 @@ def _route_pan_cards(docs: ClassifiedDocs, text_of, warnings: List[str]) -> None
         docs.by_type.setdefault("pan_owner", []).extend(owner_cards)
 
 
-def extract_entity(docs: ClassifiedDocs, warnings: List[str], cache_dir: Optional[str] = None) -> dict:
+def extract_entity(docs: ClassifiedDocs, warnings: List[str], cache_dir: Optional[str] = None,
+                   reads_out: Optional[List[DocumentRead]] = None) -> dict:
+    """`reads_out`, if given, receives one DocumentRead per parsed file -- the
+    per-document parse results the consistency check runs on after the API
+    phase (it needs the partner list to judge an owner's PAN card)."""
     # Content-based fallback for files the filename regex couldn't place --
     # e.g. "WhatsApp Image 2026-08-13 at 2.44.58 PM.jpeg" carries zero
     # filename signal even when it's a perfectly good cancelled cheque or PAN
@@ -284,12 +294,14 @@ def extract_entity(docs: ClassifiedDocs, warnings: List[str], cache_dir: Optiona
         else:
             if not r.confident:
                 warnings.append(f"{os.path.basename(f)}: unmatched by filename, and text extraction was also "
-                                 f"unavailable -- could not attempt content-based classification")
+                                 f"unavailable -- could not attempt content-based classification"
+                                 + (f" ({r.reason})" if getattr(r, "reason", "") else ""))
             still_unmatched.append(f)
     docs.unmatched = still_unmatched
     _route_pan_cards(docs, lambda f: text_of(f).text or "", warnings)
 
     doc_data = {}
+    reads: List[DocumentRead] = []
     for doc_type, files in docs.by_type.items():
         for f in files:
             r = text_of(f)
@@ -299,11 +311,9 @@ def extract_entity(docs: ClassifiedDocs, warnings: List[str], cache_dir: Optiona
                 m = _CIN_RE.search(r.text)
                 if m:
                     cin_found = m.group(0)
-            if not r.confident:
-                warnings.append(f"{os.path.basename(f)} ({doc_type}): text extraction unavailable "
-                                 f"(no digital text layer, and neither Tesseract nor vision fallback "
-                                 f"produced usable output)")
             parsed = parse_document(doc_type, r.text)
+            reads.append(DocumentRead(path=f, doc_type=doc_type, method=r.method, confident=r.confident,
+                                      parsed=parsed, reason=getattr(r, "reason", "")))
             if doc_type == "cancelled_cheque":
                 # Independent of whatever OCR text extraction found (or didn't --
                 # this still runs even when r.text is empty): a classical
@@ -393,6 +403,8 @@ def extract_entity(docs: ClassifiedDocs, warnings: List[str], cache_dir: Optiona
         else:
             entity["cin"] = cin_found
 
+    if reads_out is not None:
+        reads_out.extend(reads)
     return entity
 
 
@@ -611,13 +623,27 @@ def compute_vendor_data(docs_path: str, client: Optional[FinoscaleClient] = None
     warnings: List[str] = []
     if doc_type_overrides:
         _apply_doc_type_overrides(docs, doc_type_overrides, warnings)
-    entity = extract_entity(docs, warnings, cache_dir=ocr_cache_dir)
+    reads: List[DocumentRead] = []
+    entity = extract_entity(docs, warnings, cache_dir=ocr_cache_dir, reads_out=reads)
 
     missing = [dt for dt in REQUIRED_DOC_TYPES if not docs.has(dt)]
 
     api_errors: List[str] = []
     api_bundle = fetch_api_data(client, entity, vendor_name, api_errors)
     enrich_entity_from_api(entity, api_bundle)
+    stats = getattr(client, "cache_stats", None) or {}
+    if stats.get("stale_refetched"):
+        warnings.append(f"{stats['stale_refetched']} cached API response(s) were older than "
+                        f"{client.cache_max_age_days:g} days and were refetched live")
+    if stats.get("stale_served_offline"):
+        warnings.append(f"WARNING: {stats['stale_served_offline']} API response(s) came from an EXPIRED cache "
+                        "because the live call failed -- registry facts in this report may be out of date")
+
+    # After the API phase so the partner list (GST annexure via Ongrid, or
+    # Probe42 owners) is known: an owner's PAN card in a partner's name is
+    # fine; one in a stranger's name is not.
+    consistency = check_consistency(reads, partners=entity.get("partners"))
+    warnings.extend(consistency.warnings)
 
     resolved = resolve_all(entity, docs, api_bundle)
     _apply_manual_overrides(vendor_name, resolved)
@@ -635,7 +661,7 @@ def compute_vendor_data(docs_path: str, client: Optional[FinoscaleClient] = None
     return VendorComputation(
         vendor_name=vendor_name, docs=docs, entity=entity, api_bundle=api_bundle, resolved=resolved,
         context=context, unresolved_fields=unresolved_fields, missing_documents=missing,
-        cross_check_items=cross_check_items, api_errors=api_errors, warnings=warnings,
+        cross_check_items=cross_check_items, api_errors=api_errors, warnings=warnings, document_reads=reads,
     )
 
 
@@ -742,7 +768,7 @@ def _write_sheet(computed: VendorComputation, entity: dict, resolved: dict, scor
             missing_documents=computed.missing_documents, api_errors=computed.api_errors, warnings=warnings,
             llm_findings=review_fields.get("escalations_for_human", []),
             llm_corrections=review_fields.get("corrections_applied", []), review_summary=summary,
-            audit_rows=list(audit_rows), analyst_name=analyst_name)
+            audit_rows=list(audit_rows), analyst_name=analyst_name, document_reads=computed.document_reads)
     except Exception as e:
         warnings.append(f"Review workbook could not be written: {e}")
         return None
@@ -776,6 +802,7 @@ def run_vendor(docs_path: str, out_dir: str, client: Optional[FinoscaleClient] =
         escalations_for_human=review_fields.get("escalations_for_human", []),
         review_error=review_fields.get("review_error"), review_trace_path=review_fields.get("review_trace_path"),
         docs=computed.docs, token_usage=review_fields.get("token_usage"), sheet_path=sheet_path,
+        document_reads=computed.document_reads,
     )
 
 
@@ -818,4 +845,5 @@ def finalise_vendor(docs_path: str, sheet_path: str, out_dir: str, client: Optio
         unresolved_fields=[pid for pid, r in applied.resolved.items() if r.unresolved],
         missing_documents=computed.missing_documents, extraction_warnings=warnings, api_errors=computed.api_errors,
         cross_check_items=cross_check, corrections_applied=applied.records, docs=computed.docs, sheet_path=new_sheet,
+        document_reads=computed.document_reads,
     )

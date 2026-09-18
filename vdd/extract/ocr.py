@@ -46,6 +46,9 @@ class ExtractionResult:
     # detect_diagonal_strike) must apply this first -- an angle computed against the
     # raw, un-rotated pixels is meaningless once the real content is sideways.
     rotation: int = 0
+    # Why nothing could be extracted, when method == "unavailable" -- shown to
+    # the analyst ("encrypted PDF", "HEIC needs pillow-heif", ...).
+    reason: str = ""
 
 
 def _is_pdf(path: str) -> bool:
@@ -53,7 +56,27 @@ def _is_pdf(path: str) -> bool:
 
 
 def _is_image(path: str) -> bool:
-    return path.lower().endswith((".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"))
+    return path.lower().endswith((".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp", ".heic", ".heif"))
+
+
+def _open_image(path: str):
+    """PIL image for any supported photo format. HEIC/HEIF (the iPhone default)
+    needs the pillow-heif plugin; without it the file is reported as
+    unreadable with a reason, never silently skipped."""
+    from PIL import Image
+    if path.lower().endswith((".heic", ".heif")):
+        try:
+            import pillow_heif
+            pillow_heif.register_heif_opener()
+        except ImportError:
+            raise UnreadableDocument("HEIC/HEIF image needs the `pillow-heif` package (pip install pillow-heif)")
+    return Image.open(path)
+
+
+class UnreadableDocument(Exception):
+    """The file exists but cannot be read for a stated reason (encrypted PDF,
+    unsupported format, missing decoder) -- surfaced to the analyst as a
+    warning instead of a bare "unavailable"."""
 
 
 def _transcript_cache_path(path: str, cache_dir: Optional[str]) -> Optional[str]:
@@ -79,6 +102,10 @@ def _manual_transcript(path: str, cache_dir: Optional[str]) -> Optional[str]:
 def _pdf_text_layer(path: str) -> Optional[str]:
     import pymupdf as fitz
     with fitz.open(path) as doc:
+        if doc.needs_pass:
+            # Aadhaar e-PDFs from DigiLocker and bank statements are commonly
+            # password-protected. Nothing can be read; say so.
+            raise UnreadableDocument("PDF is password-protected -- ask the vendor for an unlocked copy")
         parts = []
         digital_enough = True
         for page in doc:
@@ -326,27 +353,33 @@ def detect_diagonal_strike(path: str, rotation: int = 0) -> Optional[bool]:
     return diagonal_total >= 0.25 * (h ** 2 + w ** 2) ** 0.5
 
 
+# OCR is ~30-60s per page on CPU. A scanned rental agreement's schedule page
+# is worth reading; a 40-page annual report's page 30 is not.
+OCR_MAX_PAGES = 6
+
+
 def extract_text(path: str, cache_dir: Optional[str] = None) -> ExtractionResult:
-    if _is_pdf(path):
-        text = _pdf_text_layer(path)
-        if text:
-            return ExtractionResult(text=text, method="pymupdf_text", confident=True)
-        try:
-            images = _pdf_to_images(path)
-        except Exception:
+    reason = ""
+    try:
+        if _is_pdf(path):
+            text = _pdf_text_layer(path)
+            if text:
+                return ExtractionResult(text=text, method="pymupdf_text", confident=True)
+            try:
+                images = _pdf_to_images(path)
+            except Exception as e:
+                images = []
+                reason = f"PDF could not be rasterised for OCR ({type(e).__name__})"
+            if len(images) > OCR_MAX_PAGES:
+                reason = f"only the first {OCR_MAX_PAGES} of {len(images)} pages were OCR'd"
+            images = images[:OCR_MAX_PAGES]
+        elif _is_image(path):
+            images = [_open_image(path)]
+        else:
             images = []
-        # PROMPT.md's documented rule: OCR at most 2 pages, too slow beyond that --
-        # but confirmed on Skandan's 6-7 page PCB Air/Water consent certs
-        # (2026-09-07) that the substantive content (applicant, premises address)
-        # is on page 1, with the rest being boilerplate terms/annexures. Cap to
-        # the first 2 pages rather than skipping the whole document just because
-        # it has more pages than that.
-        images = images[:2]
-    elif _is_image(path):
-        from PIL import Image
-        images = [Image.open(path)]
-    else:
-        images = []
+            reason = f"unsupported file type '{os.path.splitext(path)[1] or '(none)'}' -- use PDF, JPG, PNG, TIFF, WEBP or HEIC"
+    except UnreadableDocument as e:
+        return ExtractionResult(text="", method="unavailable", confident=False, reason=str(e))
 
     if images:
         # One page in the overwhelming common case (a single photographed image);
@@ -358,10 +391,14 @@ def extract_text(path: str, cache_dir: Optional[str] = None) -> ExtractionResult
         easy_score = sum(s for (_t, s, _a) in per_page)
         best_angle = max(per_page, key=lambda r: r[1])[2] if per_page else 0
         if easy_score > 0 and len(easy_text.strip()) > 20:
-            return ExtractionResult(text=easy_text, method="easyocr", confident=True, rotation=best_angle)
+            return ExtractionResult(text=easy_text, method="easyocr", confident=True, rotation=best_angle,
+                                    reason=reason)
+        if not reason:
+            reason = ("OCR found no readable text -- the image may be blank, too blurry or too dark, or the document "
+                      "too small in the frame (e.g. a selfie holding a card)")
 
     manual = _manual_transcript(path, cache_dir)
     if manual:
         return ExtractionResult(text=manual, method="manual_transcript", confident=True)
 
-    return ExtractionResult(text="", method="unavailable", confident=False)
+    return ExtractionResult(text="", method="unavailable", confident=False, reason=reason)

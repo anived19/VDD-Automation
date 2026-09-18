@@ -626,10 +626,22 @@ _ADDR_STATE_WORDS = {s.lower() for s in (
 
 def _norm_addr(s: str) -> str:
     """Collapse punctuation *inside* tokens before splitting, so 'M.I.D.C.' -> 'midc'
-    and 'G-100' -> 'g100' instead of shattering into single letters."""
+    and 'G-100' -> 'g100' instead of shattering into single letters.
+
+    A separator BETWEEN TWO DIGITS is different: it joins the parts of a compound
+    premises number ('384-385', '12/3', '135/11/A/2') and is kept as '_' so the
+    token stays whole ('384_385') but can still be split into its parts. Simply
+    deleting it turned 'Plot No. 384-385' into '384385' -- six digits, which the
+    tokeniser then took for a PIN code -- and 'Sy. No. 12/3' into '123'."""
     s = (s or "").lower().translate(_DEVANAGARI_DIGITS)
+    s = re.sub(r'(?<=\d)[.\-/\\](?=\d)', '_', s)
     s = re.sub(r'[.\-/\\]', '', s)
-    return re.sub(r'[^a-z0-9]+', ' ', s).strip()
+    return re.sub(r'[^a-z0-9_]+', ' ', s).strip('_ ')
+
+
+def _compound_parts(t: str) -> list:
+    """'384_385' -> ['384', '385']; '135_11a2' -> ['135', '11a2']; 'g100' -> ['g100']."""
+    return [p for p in t.split('_') if p]
 
 
 def _addr_token_sets(s: str):
@@ -642,31 +654,52 @@ def _addr_token_sets(s: str):
     # GST certificate and "Phase 2" on a bill both reduce to '2' and were being
     # scored as the same premises (Sri Laxmi Steel, 2026-09-18).
     premises |= {t for t in toks if t.isdigit() and 3 <= len(t) <= 5}
+    # A compound number counts whole ('384_385') and by its 3-5 digit parts, so
+    # 'Plot 384-385' and 'Plot 385' still meet.
+    for t in [t for t in toks if '_' in t]:
+        premises.add(t)
+        premises |= {p for p in _compound_parts(t) if p.isdigit() and 3 <= len(p) <= 5}
     places = {t for t in toks
               if t.isalpha() and len(t) >= 3 and t not in _ADDR_STATE_WORDS}
     return premises, places, pins
 
 
 # Words that introduce a plot / survey / door number in Indian addresses. The
-# number(s) right after one of these identify the specific premises.
-_PLOT_KEYWORDS = {"plot", "plno", "pl", "plotno", "survey", "sy", "syno", "sno", "door", "flat", "shed",
-                  "unit", "gala", "khasra", "sf", "sfno", "ts", "tsno"}
+# number(s) right after one of these identify the specific premises. They come
+# in kinds: a survey number is a land-record identifier, a plot number an
+# estate's subdivision, a door number the building's -- 'Door No. 12' and
+# 'Sy. No. 12/3' name the same place on different registers, so numbers are
+# only compared against numbers of the same kind.
+_PLOT_KINDS = {
+    "plot": {"plot", "plno", "pl", "plotno"},
+    "survey": {"survey", "sy", "syno", "sno", "sf", "sfno", "ts", "tsno", "khasra", "gat", "hissa"},
+    "door": {"door", "flat", "shed", "unit", "gala", "house", "hno", "dno", "holding"},
+}
+_PLOT_KEYWORDS = {kw for kws in _PLOT_KINDS.values() for kw in kws}
+_PLOT_KIND_OF = {kw: kind for kind, kws in _PLOT_KINDS.items() for kw in kws}
+_PLOT_KIND_LABEL = {"plot": "plot no.", "survey": "survey no.", "door": "door/flat no."}
 
 
-def _plot_numbers(s: str) -> set:
-    """The plot / survey / door numbers an address names: every run of purely
-    numeric tokens following a plot keyword (optionally via 'no'). 'plot no
-    384 385' -> {'384', '385'}; 'sy no 301' -> {'301'}; 'Road Number 2' -> {}."""
+def _premises_ids(s: str) -> dict:
+    """{kind: numbers} for every plot / survey / door number an address names:
+    each run of numeric tokens following a keyword of that kind (optionally via
+    'no'), compound numbers split into their parts. 'plot no 384 385' ->
+    {'plot': {'384', '385'}}; 'sy no 12/3' -> {'survey': {'12', '3'}};
+    'Road Number 2' -> {}."""
     toks = _norm_addr(s).split()
-    out: set = set()
+    out: dict = {}
     i = 0
     while i < len(toks):
         if toks[i] in _PLOT_KEYWORDS:
+            kind = _PLOT_KIND_OF[toks[i]]
             j = i + 1
             while j < len(toks) and toks[j] in ("no", "nos", "number", "numbers"):
                 j += 1
-            while j < len(toks) and toks[j].isdigit() and len(toks[j]) <= 5:
-                out.add(toks[j])
+            while j < len(toks):
+                parts = _compound_parts(toks[j])
+                if not parts or not all(p.isdigit() and len(p) <= 5 for p in parts):
+                    break
+                out.setdefault(kind, set()).update(parts)
                 j += 1
             i = max(j, i + 1)
         else:
@@ -674,12 +707,47 @@ def _plot_numbers(s: str) -> set:
     return out
 
 
+def _plot_numbers(s: str) -> set:
+    """All plot / survey / door numbers an address names, regardless of kind."""
+    ids = _premises_ids(s) if s else {}
+    return set().union(*ids.values()) if ids else set()
+
+
+@dataclass
+class PlotComparison:
+    conflict: bool          # some kind is named on both sides and shares no number
+    comparable: bool        # False when both sides name numbers but of different kinds only
+    a: set
+    b: set
+    kinds_a: tuple = ()
+    kinds_b: tuple = ()
+
+    def incomparable_note(self, label_a: str, label_b: str) -> str:
+        ka = " and ".join(_PLOT_KIND_LABEL[k] for k in self.kinds_a)
+        kb = " and ".join(_PLOT_KIND_LABEL[k] for k in self.kinds_b)
+        return (f"the premises identifiers are of different kinds ({ka} on the {label_a}, {kb} on the {label_b}) "
+                "and cannot be compared -- may well be the same premises on two registers")
+
+
+def _compare_plots(a: str, b: str) -> PlotComparison:
+    """Kind-by-kind comparison of the premises numbers two addresses name. A
+    conflict -- the same kind named on both sides with nothing shared -- is the
+    strongest available evidence that two addresses in the same locality are
+    different premises. Numbers of different kinds are not evidence either way."""
+    ia, ib = _premises_ids(a or ""), _premises_ids(b or "")
+    common = set(ia) & set(ib)
+    conflict = any(not (ia[k] & ib[k]) for k in common)
+    comparable = bool(common) or not (ia and ib)
+    return PlotComparison(conflict=conflict, comparable=comparable,
+                          a=set().union(*ia.values()) if ia else set(),
+                          b=set().union(*ib.values()) if ib else set(),
+                          kinds_a=tuple(sorted(ia)), kinds_b=tuple(sorted(ib)))
+
+
 def _plots_conflict(a: str, b: str):
-    """-> (conflict: bool, plots_a, plots_b). Both addresses name plot /
-    survey numbers and none is shared -- the strongest available evidence
-    that two addresses in the same locality are different premises."""
-    pa, pb = _plot_numbers(a or ""), _plot_numbers(b or "")
-    return bool(pa and pb and not (pa & pb)), pa, pb
+    """-> (conflict: bool, plots_a, plots_b). See _compare_plots."""
+    c = _compare_plots(a, b)
+    return c.conflict, c.a, c.b
 
 
 def _place_overlap(a: set, b: set) -> set:
@@ -748,10 +816,15 @@ def resolve_addr_electricity_bill(gst_address: Optional[str], bill_address: Opti
     # (Sri Laxmi Steel, 2026-09-18: bill for plot 382, GST for plots 384-385,
     # both IDA Jeedimetla; it scored 'match'). A conflict caps the outcome at
     # minor_discrepancy and is stated in the note.
-    plots_conflict, gst_plots, bill_plots = _plots_conflict(gst_address, " ".join(
-        x for x in (bill_address, bill_village) if x))
+    plots = _compare_plots(gst_address, " ".join(x for x in (bill_address, bill_village) if x))
+    plots_conflict, gst_plots, bill_plots = plots.conflict, plots.a, plots.b
     premises_match = bool(gst_prem & bill_prem) and not plots_conflict
     place_hits = _place_overlap(gst_place, bill_place)
+    # 'Door No. 12' on the bill and 'Sy. No. 12/3' on the certificate is neither
+    # a match nor a conflict; the note must say so instead of "could not be
+    # matched", which reads as a defect in the bill.
+    prem_unmatched_note = (plots.incomparable_note("GST certificate", "bill") if not plots.comparable
+                           else "the premises identifier could not be matched")
     # Does the bill's own consumer name identify the entity we're assessing?
     consumer = re.sub(r'^\s*m\s*/?\s*s\.?\s+', '', (bill_consumer_name or ""), flags=re.I)
     name_match = _name_match(consumer, entity_name or "") if consumer and entity_name else None
@@ -762,7 +835,11 @@ def resolve_addr_electricity_bill(gst_address: Optional[str], bill_address: Opti
                         f"GST-registered premises is plot/survey no. {'/'.join(sorted(gst_plots))} -- a different "
                         "premises in the same area")
     elif premises_match:
-        evidence.append(f"premises identifier matches ({'/'.join(sorted(gst_prem & bill_prem))})")
+        shared = gst_prem & bill_prem
+        # A compound number that matched whole ('135/11/A/2') is listed once, not
+        # also by its parts.
+        shared -= {p for t in shared if '_' in t for p in _compound_parts(t)}
+        evidence.append(f"premises identifier matches ({'/'.join(sorted(t.replace('_', '/') for t in shared))})")
     if place_hits:
         evidence.append(f"locality/city matches ({', '.join(sorted(place_hits))})")
     if name_match is True:
@@ -772,6 +849,15 @@ def resolve_addr_electricity_bill(gst_address: Optional[str], bill_address: Opti
         evidence.append(f"PIN {gst_pin} matches")
         if plots_conflict:
             return Resolved.ok("minor_discrepancy", src, note="; ".join(evidence))
+        if not premises_match and not place_hits:
+            # A PIN covers a whole post-office area. On its own -- no premises
+            # number, no locality word in common -- it says "same neighbourhood",
+            # not "same address"; typically the bill's address text was
+            # unreadable and only the six digits survived OCR.
+            return Resolved.ok("minor_discrepancy", src,
+                                note="; ".join(evidence) + " but nothing else does -- no premises identifier "
+                                "or locality text in common (" + prem_unmatched_note + "); the bill's address "
+                                "text may not have been read; confirm against the document")
         return Resolved.ok("match", src, note="; ".join(evidence))
 
     if gst_pin and bill_pin and gst_pin != bill_pin:
@@ -800,8 +886,7 @@ def resolve_addr_electricity_bill(gst_address: Optional[str], bill_address: Opti
         return Resolved.ok("match", src, note="; ".join(evidence) + " (no PIN available on both sides to cross-check)")
     if place_hits:
         return Resolved.ok("minor_discrepancy", src,
-                            note="; ".join(evidence) + ("" if plots_conflict else
-                                                        " but the premises identifier could not be matched"))
+                            note="; ".join(evidence) + ("" if plots_conflict else f" but {prem_unmatched_note}"))
     lic_note = _licensed_premises_note(bill_address, bill_village, licensed_addresses)
     return Resolved.missing("Could not confidently compare the electricity bill address to the GST address "
                              "(no PIN on both sides, and no premises/locality token overlap)."
@@ -818,10 +903,14 @@ def udyam_vs_gst_address_note(gst_address: Optional[str], udyam_address: Optiona
     there is nothing to compare."""
     if not gst_address or not udyam_address:
         return None
-    conflict, gst_plots, udyam_plots = _plots_conflict(gst_address, udyam_address)
+    plots = _compare_plots(gst_address, udyam_address)
+    conflict, gst_plots, udyam_plots = plots.conflict, plots.a, plots.b
     _gp, gst_place, gst_pins = _addr_token_sets(gst_address)
     _up, udyam_place, udyam_pins = _addr_token_sets(udyam_address)
     same_locality = bool(_place_overlap(gst_place, udyam_place))
+    if not plots.comparable:
+        return ("Udyam and GST registrations: " + plots.incomparable_note("GST certificate", "Udyam certificate")
+                + ("; locality agrees" if same_locality else "; NOTE: no locality text in common either"))
     if conflict:
         where = ("in the same locality" if same_locality else "in a different locality")
         return (f"WARNING: the Udyam registration gives the enterprise's address as plot/survey no. "

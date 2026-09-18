@@ -18,6 +18,7 @@ pytest>=8.0
 easyocr>=1.7
 opencv-python-headless>=4.9   # detect_diagonal_strike()'s Canny/Hough check
 pytesseract>=0.3      # also needs the Tesseract binary on PATH
+pillow-heif>=0.18     # HEIC/HEIF photos (the iPhone default); without it they are reported as unreadable, with the reason
 
 # LLM review loop (vdd/review/) -- reads the deterministic report, decides
 # what to independently re-check, corrects/escalates findings. Gemini is

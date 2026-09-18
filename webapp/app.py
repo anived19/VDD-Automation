@@ -50,7 +50,7 @@ def _build_client():
     return FinoscaleClient(api_key=api_key, base_url=base_url, cache_dir=CACHE_DIR)
 
 
-def _verification_rows(docs, extraction_warnings):
+def _verification_rows(docs, extraction_warnings, document_reads=()):
     """Per-uploaded-file classification status, for the 'was this file read
     correctly' panel. MUST use the real run's final ClassifiedDocs (result.docs)
     -- a fresh classify_folder() call only does filename matching and would
@@ -62,15 +62,24 @@ def _verification_rows(docs, extraction_warnings):
         head = w.split(":", 1)[0]
         base = head.split(" (")[0].strip()
         warned[base] = w
+    reads = {r.name: r for r in document_reads}
 
     rows = []
     for doc_type, paths in docs.by_type.items():
         for p in paths:
             base = os.path.basename(p)
+            r = reads.get(base)
+            quality = ({"quality": r.quality, "method": r.method, "missing": list(r.missing), "reason": r.reason}
+                       if r else {})
             if base in warned:
-                rows.append({"file": base, "doc_type": doc_type, "status": "warning", "detail": warned[base]})
+                rows.append({"file": base, "doc_type": doc_type, "status": "warning", "detail": warned[base], **quality})
+            elif r is not None and r.quality != "read":
+                rows.append({"file": base, "doc_type": doc_type, "status": "warning",
+                             "detail": (f"could not be read -- {r.reason}" if r.quality == "unreadable" and r.reason
+                                        else f"{r.quality} read via {r.method}; missing {', '.join(r.missing)}"),
+                             **quality})
             else:
-                rows.append({"file": base, "doc_type": doc_type, "status": "ok", "detail": None})
+                rows.append({"file": base, "doc_type": doc_type, "status": "ok", "detail": None, **quality})
     for p in docs.unmatched:
         base = os.path.basename(p)
         rows.append({"file": base, "doc_type": None, "status": "unrecognized",
@@ -110,7 +119,7 @@ def _result_json(result, client) -> dict:
         "cross_check_items": result.cross_check_items,
         "api_errors": result.api_errors,
         "extraction_warnings": result.extraction_warnings,
-        "verification": _verification_rows(result.docs, result.extraction_warnings),
+        "verification": _verification_rows(result.docs, result.extraction_warnings, result.document_reads),
         "review": {
             "reviewed": result.reviewed,
             "approved": result.approved,

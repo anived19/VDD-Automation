@@ -33,6 +33,9 @@ def main():
     ap.add_argument("--scoring-model", default="config/scoring_model.json")
     ap.add_argument("--no-api", action="store_true", help="Skip Finoscale Data API calls")
     ap.add_argument("--cache-dir", default="cache")
+    ap.add_argument("--cache-max-age", type=float, default=7.0, metavar="DAYS",
+                     help="Refetch cached API responses older than this many days (default 7; 0 = never expire)")
+    ap.add_argument("--fresh", action="store_true", help="Ignore the API cache entirely this run")
     ap.add_argument("--html", action="store_true", help="Also write the report as HTML")
     args = ap.parse_args()
 
@@ -41,7 +44,8 @@ def main():
         api_key = os.environ.get("FINOSCALE_API_KEY")
         if api_key:
             client = FinoscaleClient(api_key=api_key, base_url=os.environ.get("FINOSCALE_API_BASE", "https://api-ppe.finoscale.ai"),
-                                     cache_dir=args.cache_dir)
+                                     cache_dir=args.cache_dir,
+                                     cache_max_age_days=(0.0001 if args.fresh else args.cache_max_age))
         else:
             print("[warn] FINOSCALE_API_KEY not set -- running doc-extraction only.", file=sys.stderr)
 
