@@ -1,0 +1,99 @@
+feat: read-quality, cross-document consistency, format handling, API cache expiry, kind-aware address matching
+
+Five things the two real vendor folders (Sri Laxmi Steel, B R Trading Co,
+17-18 Sep) showed would fail silently on the next folder -- blurry cards,
+wrong-folder files, locked PDFs, stale registry answers, incomparable
+premises numbers. Each is now a plain line in the run output, the
+workbook's Flags/Documents sheets and the reviewer's prompt. None of them
+changes a score by itself except the last.
+
+Read quality per document (vdd/extract/consistency.py, new)
+  Every file gets a quality: READ / PARTIAL / POOR / UNREADABLE, from how
+  many of the fields that document type normally carries (EXPECTED_FIELDS)
+  were actually recovered, plus the method (text layer / OCR). A blurry
+  PAN card that yielded no number is "BRT_pan.pdf (pan_entity): PARTIAL
+  READ via easyocr -- missing pan", not a mysteriously unresolved score
+  three rows later. Shown in the Documents sheet (three new columns, colour
+  coded) and the webapp's verification panel.
+
+Cross-document consistency (same module)
+  Every parsed GSTIN / PAN / name is checked against the GST certificate's
+  (the anchor -- every vendor has one and its GSTIN embeds the PAN). A
+  wrong-folder file, a stale certificate or an OCR garble that still looks
+  like a valid number each become one warning naming the file and the two
+  values. An individual's PAN (4th letter P) filed as the entity's is
+  called out as "likely an owner's card"; an owner's card whose name is
+  not among the partners on record asks whose it is. Runs after the API
+  phase so the partner list is known. Names agree on two shared words or
+  a 0.8 character ratio -- one shared word ("PARTNER") is not agreement.
+
+Formats and the reason a file could not be read (vdd/extract/ocr.py)
+  ExtractionResult.reason. Password-protected PDFs (DigiLocker Aadhaar,
+  bank statements) say so instead of reading as blank; .webp/.heic/.heif
+  are accepted (HEIC via pillow-heif, and the message says to install it
+  when it is missing); an unsupported type (.docx) is named; a PDF that
+  cannot be rasterised names the exception; OCR reads up to 6 pages of a
+  scanned document (was 2 -- a rental agreement's schedule page is on
+  page 4) and says when it stopped short; a photo OCR found nothing in
+  says so, including the case where the document is too small in the
+  frame (the selfie-holding-an-Aadhaar in the B R Trading folder). The
+  reason travels with the DocumentRead into the consistency warning, the
+  Documents sheet's last column (in place of the missing-fields list for
+  an unreadable file) and the webapp's verification panel. pillow-heif is
+  added to requirements.txt.
+
+API cache expiry (vdd/finoscale_api/client.py)
+  Cached responses expire after cache_max_age_days (default 7; 0 = never)
+  and are refetched; if the refetch fails the stale answer is served but
+  counted, and the run carries "WARNING: N API response(s) came from an
+  EXPIRED cache because the live call failed -- registry facts in this
+  report may be out of date". run_vendor.py and finalise_report.py take
+  --cache-max-age DAYS and --fresh. A GSTIN cancelled last week no longer
+  reads Active from a months-old cache with nothing to say so.
+
+Premises numbers have kinds; a PIN alone is not an address (resolvers.py)
+  - Plot / survey / door numbers are compared kind against kind. 'Sy. No.
+    12/3' on the certificate and 'Door No. 12' on the bill is the same
+    premises on two registers: neither a match nor a discrepancy, and the
+    note now says "of different kinds ... cannot be compared" instead of
+    "could not be matched". Same-kind conflicts (plot 382 vs plot 384-385)
+    are unchanged. The Udyam-vs-GST note states incomparable kinds the
+    same way instead of raising a WARNING.
+  - A separator between two digits joins a compound number instead of
+    being deleted: 'Plot No. 384-385' was becoming '384385' -- six digits,
+    which the tokeniser then took for a PIN code -- and 'Sy. No. 12/3'
+    was becoming '123'. The compound stays whole ('384_385') and also
+    counts by its parts, so 'Plot 384-385' and 'Plot 385' still meet;
+    '135/11/A/2' still matches whole.
+  - Both PINs present and equal but nothing else in common (no premises
+    number, no locality word) now scores minor_discrepancy with "PIN
+    matches but nothing else does ... the bill's address text may not
+    have been read", not match. A PIN covers a post-office area; on its
+    own it usually means the bill's address line was unreadable. This is
+    the one scoring change; neither real folder hits it.
+
+Tests: 160 (was 139) -- tests/test_consistency.py,
+tests/test_format_and_cache.py (encrypted PDF, HEIC without decoder,
+unsupported type, page cap, blank OCR, rasterise failure, reason in the
+warning; fresh / stale / never-expire / stale-served-offline cache),
+tests/test_address_kinds.py -- all new.
+
+Both real folders re-run after all of the above: Sri Laxmi Steel 30/100
+and B R Trading Co 45/100, unchanged, every address note word-for-word
+the same; the only new lines are the read-quality / reason ones (the
+screenshot's "too small in the frame", BRT_pan.pdf's "PARTIAL READ --
+missing pan").
+
+Files: vdd/extract/consistency.py (new), vdd/extract/ocr.py,
+vdd/finoscale_api/client.py, vdd/resolve/resolvers.py, vdd/pipeline.py,
+vdd/review_sheet.py, webapp/app.py, run_vendor.py, finalise_report.py,
+requirements.txt; tests/test_consistency.py, tests/test_format_and_cache.py,
+tests/test_address_kinds.py.
+
+Known, deliberately not changed: the GST certificate's Annexure A
+(additional places of business) is not extracted; the trade-name parser
+strips "M/S " but not "M/S."; the token-overlap name match still treats
+two partners sharing a surname as the same name; GST-certificate field
+labels joined by '/' ("Road/Street") still collapse to one token.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>

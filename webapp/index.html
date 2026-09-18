@@ -316,9 +316,12 @@ function renderResults(data){
     ctaEl.innerHTML += `<a class="btn" href="${data.html_report_url}" target="_blank">View full report</a>`;
   }
   if (data.pdf_report_url) {
-    ctaEl.innerHTML += `<a class="btn secondary" href="${data.pdf_report_url}" target="_blank">Download PDF</a>`;
+    ctaEl.innerHTML += `<a class="btn" href="${data.pdf_report_url}" target="_blank">Download PDF</a>`;
   }
-  if (!data.html_report_url) {
+  if (data.review_sheet_url) {
+    ctaEl.innerHTML += `<a class="btn secondary" href="${data.review_sheet_url}">Download review sheet (Excel)</a>`;
+  }
+  if (!data.html_report_url && !data.pdf_report_url) {
     ctaEl.innerHTML = '<span style="color:var(--ink-faint);font-size:13.5px">Report could not be generated this run.</span>';
   }
 

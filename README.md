@@ -92,8 +92,8 @@ documents without script collisions.
 
 ## LLM review loop
 
-`vdd/review/` (LangGraph) runs automatically whenever `GEMINI_API_KEY` (or
-`OPENAI_API_KEY`, see below) is set and `--no-review` wasn't passed — it
+`vdd/review/` (LangGraph) runs automatically whenever `GEMINI_API_KEY`,
+`OPENAI_API_KEY`, or a Foundry endpoint (see below) is set and `--no-review` wasn't passed — it
 degrades to a clear console note and the deterministic-only report
 otherwise, the same graceful-degrade idiom used everywhere else in this
 pipeline. It reads the rendered report plus the resolved parameter values
@@ -110,10 +110,40 @@ findings, tool calls, and corrections are written to a local
 `<VENDOR>_review_trace.json` file next to the report — never transmitted
 anywhere.
 
-**Provider**: Gemini (`gemini-3.5-flash-lite`) is the tested path. Set
-`OPENAI_API_KEY` (and `OPENAI_MODEL`) instead to swap providers — see
-`vdd/review/model.py` — but that path is untested; no OpenAI key was
-available while building it.
+**Provider**: three, selected by `LLM_PROVIDER` (else foundry > gemini >
+openai by what's configured) — see `vdd/review/model.py`:
+
+- **Gemini** (`gemini-3.5-flash-lite`) — tested; 4/4 recall on the Skandan
+  benchmark, ~16–19k input tokens per pass.
+- **OpenAI** (`OPENAI_API_KEY` + `OPENAI_MODEL`) — tested 2026-09-16 with
+  `gpt-5.6-luna`; the most thorough reviewer so far, ~2× Gemini's tokens.
+- **Microsoft Foundry** (`FOUNDRY_ENDPOINT` / `FOUNDRY_API_KEY` /
+  `FOUNDRY_DEPLOYMENT`) — an open-weight model such as DeepSeek-V4-Pro or
+  Kimi K3, sold and hosted by Azure in our own subscription. This is the
+  **data-residency path**: the model's maker never sees a request, Microsoft
+  does not train on or share prompts and completions, and with a regional /
+  Data Zone deployment plus the modified abuse-monitoring exemption nothing
+  is stored. `.env.example` carries the five-step deployment checklist those
+  guarantees depend on — do all of them. Because an open model's agentic
+  behaviour is unproven, this provider runs a bounded loop: a stated
+  per-pass tool budget (`FOUNDRY_MAX_MODEL_CALLS`, default 8) and a forced
+  `ReviewReport` on the last allowed call, so a pass always ends with a
+  report or a written transcript of why it didn't
+  (`<VENDOR>_review_failure_pass<N>.json`).
+
+**Web search is off by default.** The reviewer's `web_search` tool (Tavily)
+is only offered when `REVIEW_WEB_SEARCH=1`: the model writes the query text
+itself and has put a PAN and a premises address into it in real traces, and
+Tavily is not a KYC data source. Every benchmark run reached full recall
+without it. Note that Azure's own "Grounding with Bing Search" is explicitly
+outside the Azure compliance boundary (the DPA does not apply), so it is not
+a substitute.
+
+**Evaluating a model**: run the Skandan vendor folder and score the trace —
+`python compare_reviews.py out/<trace>.json --expect
+com_bank_verification,addr_ownership_type,ident_pan_active,legal_sanctions`.
+Recall on those four, corrections vs escalations, and no `verified` finding
+without a tool call behind it are the acceptance bar.
 
 **Tracing must stay off.** This pipeline handles consented but highly
 sensitive personal financial/KYC data — LangChain/LangSmith tracing must

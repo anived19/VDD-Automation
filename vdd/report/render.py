@@ -396,14 +396,18 @@ def render_pdf(html, out_pdf):
     return best[0]
 
 
-def generate_report(context, out_dir, html_only=False):
+def generate_report(context, out_dir, html_only=False, write_html=False):
     """context: the `d` dict shape documented at the top of this file.
-    Returns (html_path, pdf_path | None)."""
+    Returns (html_path | None, pdf_path | None). The PDF is the deliverable;
+    the HTML is only written when asked for (`write_html`) or as the
+    fallback when PDF rendering is impossible (`html_only`)."""
     os.makedirs(out_dir, exist_ok=True)
     fname = re.sub(r'[^A-Za-z0-9]+', '_', context['firm']).strip('_').upper() + "_VDD_Report"
     html = build(context)
-    html_path = os.path.join(out_dir, fname + ".html")
-    open(html_path, "w", encoding="utf-8").write(html)
+    html_path = None
+    if html_only or write_html:
+        html_path = os.path.join(out_dir, fname + ".html")
+        open(html_path, "w", encoding="utf-8").write(html)
     if html_only:
         return html_path, None
     pdf_path = os.path.join(out_dir, fname + ".pdf")

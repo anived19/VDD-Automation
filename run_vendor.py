@@ -7,6 +7,7 @@ Usage:
     python run_vendor.py --docs "..." --out out/ --no-review   # skip the LLM review loop
 """
 import argparse
+import logging
 import os
 import sys
 
@@ -16,6 +17,11 @@ from vdd.finoscale_api.client import FinoscaleClient
 from vdd.pipeline import run_vendor
 
 load_dotenv()
+# The review layer's INFO lines (forced-finish, call budget) and the failure
+# transcript are the evidence needed to judge a new model; everything else
+# stays at WARNING so third-party libraries don't flood the output.
+logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s", stream=sys.stderr)
+logging.getLogger("vdd.review").setLevel(logging.INFO)
 
 
 def main():
@@ -25,10 +31,14 @@ def main():
     ap.add_argument("--scoring-model", default="config/scoring_model.json")
     ap.add_argument("--no-api", action="store_true", help="Skip Finoscale Data API calls (doc extraction only)")
     ap.add_argument("--cache-dir", default="cache", help="Directory to cache API responses (default: cache/)")
+    ap.add_argument("--cache-max-age", type=float, default=7.0, metavar="DAYS",
+                     help="Refetch cached API responses older than this many days (default 7; 0 = never expire)")
+    ap.add_argument("--fresh", action="store_true", help="Ignore the API cache entirely this run")
     ap.add_argument("--no-review", action="store_true",
                      help="Skip the LLM review loop regardless of GEMINI_API_KEY/OPENAI_API_KEY -- deterministic-only report")
     ap.add_argument("--max-review-iterations", type=int, default=None,
                      help="Safety cap on review passes (default: vdd.review.graph.DEFAULT_MAX_ITERATIONS)")
+    ap.add_argument("--html", action="store_true", help="Also write the report as HTML (the PDF is the deliverable)")
     args = ap.parse_args()
 
     client = None
@@ -39,11 +49,12 @@ def main():
                   "Set it in .env or pass --no-api to silence this.", file=sys.stderr)
         else:
             base_url = os.environ.get("FINOSCALE_API_BASE", "https://api-ppe.finoscale.ai")
-            client = FinoscaleClient(api_key=api_key, base_url=base_url, cache_dir=args.cache_dir)
+            client = FinoscaleClient(api_key=api_key, base_url=base_url, cache_dir=args.cache_dir,
+                                     cache_max_age_days=(0.0001 if args.fresh else args.cache_max_age))
 
     result = run_vendor(args.docs, args.out, client=client, scoring_model_path=args.scoring_model,
                          ocr_cache_dir=args.cache_dir, review=not args.no_review,
-                         max_review_iterations=args.max_review_iterations)
+                         max_review_iterations=args.max_review_iterations, write_html=args.html)
 
     print(f"\n=== {result.vendor_name} ===")
     print(f"Score: {result.score}/100 (No-Consent categories only -- "
@@ -52,6 +63,8 @@ def main():
         print(f"HTML:  {result.html_path}")
     if result.pdf_path:
         print(f"PDF:   {result.pdf_path}")
+    if result.sheet_path:
+        print(f"Review sheet: {result.sheet_path}  (edit in Excel, then: python finalise_report.py --docs ... --sheet ...)")
 
     if result.reviewed:
         status = "approved by the reviewer" if result.approved else "safety cap reached, not approved"

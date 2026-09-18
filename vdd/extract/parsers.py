@@ -126,6 +126,29 @@ def parse_msme_certificate(text: str) -> dict:
     m = re.search(r'Type of Organisation\s*\n?\s*(\w+)', text)
     if m:
         out["organisation_type"] = m.group(1).strip()
+    # The Udyam printout's address block: label / value on alternating lines
+    # from "OFFICAL ADDRESS OF ENTERPRISE" (sic, as printed) to the Mobile line.
+    # Kept as one string in the same "Label: value" shape the GST certificate's
+    # address uses, so the two can be compared token for token.
+    m = re.search(r'OFFICI?AL ADDRESS OF\s*\n?\s*ENTERPRISE\s*\n(.+?)\n\s*(?:Mobile|Email)\b', text, re.S)
+    if m:
+        lines = [l.strip() for l in m.group(1).splitlines() if l.strip()]
+        labels = ("Flat/Door/Block No.", "Name of Premises/ Building", "Village/Town", "Block",
+                  "Road/Street/Lane", "City", "State", "District")
+        parts, i = [], 0
+        while i < len(lines):
+            if lines[i] in labels and i + 1 < len(lines):
+                value = lines[i + 1]
+                if value not in labels and value != "-":
+                    parts.append(f"{lines[i]}: {value}")
+                i += 2
+            else:
+                i += 1
+        if parts:
+            out["address"] = " ".join(parts)
+            pm = re.search(r'\bPin\s*(\d{6})', m.group(1))
+            if pm:
+                out["pincode"] = pm.group(1)
     # National Industry Classification codes. The Udyam printout lays these out as a
     # 4-column table (2-digit / 4-digit / 5-digit / activity), each cell on its own
     # line and each prefixed with "<code> - <description>". The 5-digit code is the
@@ -214,7 +237,15 @@ def parse_electricity_bill(text: str) -> dict:
     m = re.search(r'(?:Consumer Name|ग्राहकाचे नाव|उपभोक्ता का नाम|ಗ್ರಾಹಕರ ಹೆಸರು|వినియోగదారు పేరు|நுகர்வோர் பெயர்)\s*[:\-]?\s*(.+)', text, re.I)
     if m:
         out["consumer_name"] = m.group(1).strip()
-    m = re.search(r'(?:Address|पत्ता|पता|ವಿಳಾಸ|చిరునామా|முகவரி)\s*[:\-]?\s*\n?\s*(.+?)(?:\n\s*(?:Village|Pin Code|Category|गाव|पिन कोड|प्रवर्ग|गांव|ಗ್ರಾಮ|ವರ್ಗ|వర్గం|வகை)|\Z)', text, re.S | re.I)
+    # The address ends at the next label. The second alternation group is the
+    # Telangana/AP DISCOM (TSSPDCL/APSPDCL) layout, whose bill continues straight
+    # into "Section Name / Your Arrears as on / Current Month Bill / ..." -- without
+    # these terminators the whole rest of the bill (dates, amounts) was captured
+    # as the address (seen 2026-09-17, Sri Laxmi Steel).
+    m = re.search(r'(?:Address|पत्ता|पता|ವಿಳಾಸ|చిరునామా|முகவரி)\s*[:\-]?\s*\n?\s*(.+?)'
+                  r'(?:\n\s*(?:Village|Pin Code|Category|गाव|पिन कोड|प्रवर्ग|गांव|ಗ್ರಾಮ|ವರ್ಗ|వర్గం|வகை'
+                  r'|Section Name|Your Arrears|Current Month Bill|Total Amount|Due Date|Bill Date|Bill Period'
+                  r'|Meter|Consumer No|Service No|Unique Service|ERO\b|Tariff|Units)|\Z)', text, re.S | re.I)
     if m:
         addr_lines = [l.strip() for l in m.group(1).splitlines() if l.strip()]
         out["address"] = ", ".join(addr_lines)
@@ -225,6 +256,24 @@ def parse_electricity_bill(text: str) -> dict:
         if m:
             out["consumer_name"] = m.group(1).strip()
             out["address"] = re.sub(r'\s+', ' ', m.group(2)).strip()
+
+    if "consumer_name" not in out and "address" not in out:
+        # Unlabelled consumer block (CESC / Kolkata bills, 2026-09-17, B R Trading
+        # Co): the name is printed as an "M/S ..." line with the address on the
+        # lines directly under it, ending on the line that carries the PIN code.
+        # No label anywhere, so the name line itself is the anchor.
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+        for i, line in enumerate(lines):
+            if re.match(r'^\s*m\s*/?\s*s\.?\s+\S', line, re.I):
+                block = []
+                for nxt in lines[i + 1:i + 7]:
+                    block.append(nxt)
+                    if re.search(r'\b\d{6}\b', nxt):
+                        break
+                if block and re.search(r'\b\d{6}\b', block[-1]):
+                    out["consumer_name"] = line
+                    out["address"] = ", ".join(block)
+                    break
     m = re.search(r'(?:Pin Code|पिन कोड|ಪಿನ್ ಕೋಡ್|పిన్ కోడ్|அஞ்சல் குறியீடு)\s*[:\-]?\s*(\d{6})', text, re.I)
     if m:
         out["pincode"] = m.group(1)
@@ -315,29 +364,47 @@ def parse_pan_card(text: str) -> dict:
     lines = [l.strip() for l in text.splitlines() if l.strip()]
 
     def _is_date(s: str) -> bool:
-        return bool(re.match(r'^\d{2}/\d{2}/\d{4}$', s))
+        return bool(re.match(r'^\d{2}/\d{2}/\d{4}', s))
+
+    def _is_name_candidate(s: str) -> bool:
+        # The current physical card is bilingual: "आयकर विभाग / INCOME TAX
+        # DEPARTMENT", "स्थायी लेखा संख्या कार्ड / Permanent Account Number Card",
+        # then the PAN, then the holder's name in Latin capitals. Seen 2026-09-17
+        # (Sri Laxmi Steel): the first line after the header was the Devanagari
+        # title, which was taken as the name -- so ident_pan_name_match had no
+        # Latin tokens to compare and stayed unresolved with the real name one
+        # line further down. OCR'd scans also garble the labels ("Numiber"),
+        # hence the stem matches.
+        low = s.lower()
+        if _is_date(s) or PAN_RE.fullmatch(s.replace(" ", "")):
+            return False
+        if re.search(r'permanent\s*account|income\s*tax|go[vy]t|government|electronically issued|'
+                     r'fa[lt]her|d[ao][tl]e\s*[o0]f\s*birth|signature', low):
+            return False
+        if not re.search(r'[A-Za-z]{2,}', s):
+            return False
+        # A caption, not a name: the card's "नाम / Name" and "पिता का नाम /
+        # Father's Name" labels OCR as "Name", "I Name", "नाम Name",
+        # "Father'$ Name", "Falher s Name". A name that merely ends in the
+        # word "name" is left alone.
+        return not re.fullmatch(r'[^a-z]*(?:i\s+)?(?:fa[lt]her\S*\s+(?:s\s+)?|mother\S*\s+)?name\s*[:\-]?', low)
 
     for i, line in enumerate(lines):
-        if re.search(r'govt\.?\s*of\s*india', line, re.I):
+        if re.search(r'go[vy]t\.?\s*of\s*india', line, re.I):
             for cand in lines[i + 1:]:
-                if _is_date(cand) or 'permanent account' in cand.lower():
+                if _is_name_candidate(cand):
+                    out["name"] = cand
                     break
-                out["name"] = cand
-                break
             break
 
     if "name" not in out:
+        # e-PAN layout: the name is the first real line after the PAN number.
         for i, line in enumerate(lines):
             if PAN_RE.fullmatch(line.replace(" ", "")):
-                j = i + 1
-                while j < len(lines) and _is_date(lines[j]):
-                    j += 1
-                if j < len(lines):
-                    cand = lines[j]
-                    if (not _is_date(cand) and 'permanent account' not in cand.lower()
-                            and 'electronically issued' not in cand.lower()
-                            and not PAN_RE.fullmatch(cand.replace(" ", ""))):
+                for cand in lines[i + 1:]:
+                    if _is_name_candidate(cand):
                         out["name"] = cand
+                        break
                 break
 
     return out

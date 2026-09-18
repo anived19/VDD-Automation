@@ -19,11 +19,15 @@ invoked).
 from __future__ import annotations
 
 import copy
+import json
 import logging
+import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from langchain.agents import create_agent
+from langchain.agents.middleware import AgentMiddleware, ModelCallLimitMiddleware
+from langchain_core.messages import HumanMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
@@ -42,6 +46,85 @@ logger = logging.getLogger(__name__)
 _SYSTEM_PROMPT = (Path(__file__).parent / "prompts" / "reviewer.md").read_text(encoding="utf-8")
 
 DEFAULT_MAX_ITERATIONS = 4
+
+# Model calls allowed per pass on the Foundry provider (the last one is
+# reserved for ReviewReport -- see _FinishWithReport). Gemini converges in 2
+# calls and OpenAI in 2-3 on every trace to date, so 8 is a backstop for a
+# model that keeps re-checking, not a budget a good reviewer should approach.
+# The Qwen experiments (QwenTest branch) derived this from a 32k context
+# window; Foundry-hosted models have 128k+ so a constant is enough here.
+FOUNDRY_MAX_MODEL_CALLS = int(os.environ.get("FOUNDRY_MAX_MODEL_CALLS", "8"))
+
+
+class _FinishWithReport(AgentMiddleware):
+    """Guarantees the pass ends with a ReviewReport. create_agent binds every
+    turn with tool_choice="any" when a structured output is requested, so the
+    model can never answer in prose -- calling `ReviewReport` is the only
+    exit. Observed 2026-09-16 with a small self-hosted model: it spent every
+    allowed call on recheck tools (one an identical repeat) and never took
+    that exit. On the last allowed call this strips every other tool from the
+    request, leaving ReviewReport as the only legal move, and appends a
+    one-line nudge for that call only (not persisted to state)."""
+
+    def __init__(self, model_calls: int):
+        super().__init__()
+        self.model_calls = model_calls
+        self.calls = 0
+
+    def wrap_model_call(self, request, handler):
+        self.calls += 1
+        if self.calls >= self.model_calls:
+            logger.info("Review: model call %d/%d -- forcing ReviewReport (all other tools withheld).",
+                        self.calls, self.model_calls)
+            nudge = HumanMessage(content="Your tool budget for this pass is used up. Submit your ReviewReport "
+                                         "now, using only the evidence already in this conversation -- anything "
+                                         "you could not verify goes in as action='escalate'.")
+            request = request.override(tools=[], messages=list(request.messages) + [nudge])
+        return handler(request)
+
+
+def _bounded_loop_middleware(model_calls: int) -> list:
+    return [
+        _FinishWithReport(model_calls),
+        # Backstop only: reached if the forced ReviewReport call itself fails
+        # schema validation twice (ToolStrategy re-prompts on a bad payload).
+        ModelCallLimitMiddleware(run_limit=model_calls + 2, exit_behavior="end"),
+    ]
+
+
+def _tool_budget_section(tool_calls: int) -> str:
+    return ("## Tool budget for this pass\n"
+            f"You may make at most {tool_calls} tool call(s) this pass. Then you MUST submit your findings by "
+            "calling `ReviewReport` -- that call is how you finish; without it the pass fails and nothing you "
+            "found is recorded. Never call the same tool with the same arguments twice in a pass: the result "
+            "will not change. Spend calls on the cross-check items first; anything you can't verify within "
+            "budget goes in as action='escalate', not as another call.")
+
+
+def _dump_failed_pass(state: ReviewState, messages: list, error: str) -> Optional[str]:
+    """Persist the partial transcript of a pass that didn't produce a
+    ReviewReport -- the ReAct loop's own messages are the only evidence of
+    WHY (which tool was called how often, how big each result was, what the
+    model actually emitted). Same local-only JSON idiom as trace.py; never
+    transmitted."""
+    out_dir = state.get("out_dir")
+    serialized = serialize_messages(messages)
+    summary = []
+    for i, m in enumerate(serialized):
+        name = m.get("tool_name") or ",".join(tc.get("name") or "?" for tc in m.get("tool_calls") or [])
+        summary.append(f"  #{i:<3} {m['type']:<11} {name:<28} {len(str(m.get('content') or '')):>7,} chars")
+    logger.warning("Review pass %d failed after %d messages (%s). Transcript:\n%s",
+                   state.get("iteration", 1), len(serialized), error[:300], "\n".join(summary) or "  (none)")
+    if not out_dir:
+        return None
+    os.makedirs(out_dir, exist_ok=True)
+    safe = "".join(c if c.isalnum() else "_" for c in state.get("vendor_name", "")).strip("_").upper() or "VENDOR"
+    path = os.path.join(out_dir, f"{safe}_review_failure_pass{state.get('iteration', 1)}.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"vendor_name": state.get("vendor_name"), "iteration": state.get("iteration", 1),
+                   "provider": select_provider(), "error": error, "messages": serialized}, f, indent=2, default=str)
+    logger.warning("Full transcript written to %s", path)
+    return path
 
 
 def _pass_instructions(iteration: int) -> str:
@@ -130,14 +213,39 @@ def llm_review(state: ReviewState) -> dict:
     provider = select_provider()
     model = build_review_model()
     if model is None:
-        raise RuntimeError("No usable LLM key configured (GEMINI_API_KEY/OPENAI_API_KEY) -- the review "
-                            "graph must not be invoked without one; see vdd/pipeline.py's caller.")
+        raise RuntimeError("No usable LLM key configured (GEMINI_API_KEY/OPENAI_API_KEY/FOUNDRY_*) -- the "
+                            "review graph must not be invoked without one; see vdd/pipeline.py's caller.")
     tools = make_tools(state.get("client"))
-    agent = create_agent(model=model, tools=tools, system_prompt=_SYSTEM_PROMPT, response_format=ReviewReport)
-
     user_msg = _build_user_message(state)
-    result = agent.invoke({"messages": [{"role": "user", "content": user_msg}]})
-    report: ReviewReport = result["structured_response"]
+
+    # Gemini and OpenAI converge on their own (every trace to date); an
+    # open-weight model on Foundry is unproven, so it gets the bounded loop:
+    # a stated budget in the prompt and a forced ReviewReport on the last call.
+    middleware: list = []
+    if provider == "foundry":
+        middleware = _bounded_loop_middleware(FOUNDRY_MAX_MODEL_CALLS)
+        user_msg += "\n\n" + _tool_budget_section(FOUNDRY_MAX_MODEL_CALLS - 1)
+    agent = create_agent(model=model, tools=tools, system_prompt=_SYSTEM_PROMPT, response_format=ReviewReport,
+                         middleware=middleware)
+
+    # Streamed rather than invoke()d so the messages accumulated so far survive
+    # an exception mid-pass (a provider rejecting a later turn, a tool crash) --
+    # invoke() would raise with nothing to show for what the loop had done.
+    result: dict = {}
+    try:
+        for result in agent.stream({"messages": [{"role": "user", "content": user_msg}]}, stream_mode="values"):
+            pass
+    except Exception as e:
+        _dump_failed_pass(state, result.get("messages", []), f"{type(e).__name__}: {e}")
+        raise
+    report: ReviewReport | None = result.get("structured_response")
+    if report is None:
+        messages = result.get("messages", [])
+        _dump_failed_pass(state, messages, "agent finished without a structured ReviewReport")
+        last = messages[-1] if messages else None
+        preview = str(getattr(last, "content", ""))[:500]
+        raise RuntimeError("LLM returned no usable structured ReviewReport -- see the transcript logged above. "
+                           f"Last message: {preview!r}")
     report_dict = report.model_dump()
     _normalise_parameter_ids(report_dict["findings"], state)
 

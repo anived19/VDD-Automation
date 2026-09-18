@@ -131,7 +131,16 @@ def _name_match(a: str, b: str) -> Optional[bool]:
     if not sa or not sb:
         return None
     overlap = len(sa & sb) / max(len(sa), len(sb))
-    return overlap >= 0.6
+    if overlap >= 0.6:
+        return True
+    # OCR'd names miss the token test on a single garbled word ("B R TRAIING ?O"
+    # vs "B R TRADING CO", 2026-09-17) while being obviously the same name to a
+    # reader. A character-level ratio of 0.85 over the whole normalised string
+    # (word order kept) is strict enough that different people sharing a
+    # surname stay apart (two partners "X PRASAD RAY" / "Y PRASAD RAY": 0.70).
+    from difflib import SequenceMatcher
+    clean = lambda s: re.sub(r'\s+', ' ', re.sub(r'[^a-z0-9 ]', '', s.lower())).strip()
+    return SequenceMatcher(None, clean(a), clean(b)).ratio() >= 0.85
 
 
 # ==================================================================== COMPLIANCE
@@ -483,6 +492,22 @@ def resolve_com_pf_filing_status(api: ApiBundle) -> Resolved:
 
 
 # ==================================================================== PROOF OF ADDRESS
+def _bill_consumer_matches_entity(entity: dict) -> Optional[bool]:
+    """Does the electricity bill's consumer name identify this vendor (any of its
+    legal/trade/PAN names or a named partner)? None when there is nothing to
+    compare. Same M/S-stripping and token-overlap rule as
+    resolve_addr_electricity_bill, so the two resolvers can't disagree."""
+    consumer = re.sub(r'^\s*m\s*/?\s*s\.?\s+', '', entity.get("electricity_bill_consumer_name") or "", flags=re.I)
+    if not consumer.strip():
+        return None
+    candidates = [entity.get(k) for k in ("legal_name", "trade_name", "pan_entity_name", "pan_owner_name")]
+    candidates += list(entity.get("partners") or [])
+    verdicts = [_name_match(consumer, c) for c in candidates if c]
+    if not any(v is not None for v in verdicts):
+        return None
+    return any(v is True for v in verdicts)
+
+
 def resolve_addr_ownership_type(has_rental_doc: bool, has_electricity_doc: bool,
                                  has_sale_deed: bool = False, entity: dict = None) -> Resolved:
     entity = entity or {}
@@ -492,12 +517,28 @@ def resolve_addr_ownership_type(has_rental_doc: bool, has_electricity_doc: bool,
         return Resolved.ok("rented", "doc:rental_agreement present",
                             note="Cannot distinguish 'rented' vs 'leased' from document presence alone")
     if has_electricity_doc:
+        consumer_is_entity = _bill_consumer_matches_entity(entity)
+        if consumer_is_entity is False:
+            # The connection at the premises is held by someone else. That is the
+            # usual signature of rented/leased premises (the landlord's meter), and
+            # it is evidence AGAINST ownership -- inferring "owned" from it was a
+            # real defect (2026-09-17: a bill in a third party's name corroborated
+            # an "owned" verdict). Without a rental/lease agreement on file the
+            # honest answer is unresolved, with the reason spelled out.
+            return Resolved.missing(
+                f"GAP: the electricity connection at the premises is in a third party's name "
+                f"('{entity['electricity_bill_consumer_name'].strip()}'), not the entity's -- the usual sign of "
+                "rented/leased premises -- but no rental/lease agreement is on file, so the ownership type "
+                "cannot be inferred. Obtain the rental agreement and landlord NOC (or a sale deed if the "
+                "premises are in fact owned).",
+                source="doc:electricity_bill present (consumer name does not match the entity), no "
+                       "rental/lease agreement in document set")
         # No sale deed in the document set, so ownership is inferred. Spell out the
         # corroborating evidence rather than calling it a bare assumption -- the
         # report prints ScoringModel.json's own condition label here ("Owned --
         # confirmed via sale deed"), which would otherwise overstate what we hold.
         corroboration = []
-        if entity.get("electricity_bill_consumer_name"):
+        if consumer_is_entity is True:
             corroboration.append(f"the industrial electricity connection is in the entity's own name "
                                   f"({entity['electricity_bill_consumer_name'].strip()})")
         if entity.get("electricity_bill_connection_date"):
@@ -513,6 +554,22 @@ def resolve_addr_ownership_type(has_rental_doc: bool, has_electricity_doc: bool,
         return Resolved.ok("owned", "doc:electricity_bill present, no rental/lease agreement in document set",
                             note=note)
     return Resolved.missing("Neither a rental agreement nor an electricity bill is on file")
+
+
+def resolve_addr_rental_validation(ownership: Resolved, electricity: Resolved) -> Resolved:
+    """Derived entirely from ownership type + the electricity-bill match, so it
+    can be re-derived after either of those is overridden (the analyst
+    review sheet does this -- see review_sheet.apply_review_sheet)."""
+    if not ownership.unresolved and ownership.value == "owned":
+        # ScoringModel.json's own instruction: "For owned premises score full" --
+        # independent of whether we could also OCR-match the electricity bill address.
+        return Resolved.ok("owned", "derived from addr_ownership_type=owned",
+                           note="Full score for owned premises per ScoringModel.json rule")
+    if not ownership.unresolved and ownership.value in ("rented", "leased") \
+            and not electricity.unresolved and electricity.value == "match":
+        return Resolved.ok("rented_matching", "addr_ownership_type + addr_electricity_bill")
+    return Resolved.missing(
+        "Ownership type unresolved, or rented without a confirmed matching electricity-bill address")
 
 
 def resolve_addr_landlord_declaration(ownership: Resolved, has_landlord_doc: bool = False) -> Resolved:
@@ -550,7 +607,15 @@ _ADDR_STOP_WORDS = {
     "lane", "marg", "village", "vtc", "town", "city", "dist", "district", "state",
     "pin", "code", "near", "opp", "opposite", "behind", "at", "post", "po", "the",
     "and", "of", "ms", "mrs", "mr", "shri", "india",
+    # Field labels that leak into address text from both sides ("Name Of
+    # Premises/Building" on the GST certificate, "Section Name" on a DISCOM
+    # bill) and were being scored as a matching locality (2026-09-17).
+    "name", "section", "sl", "sr", "sno",
 }
+
+# Devanagari digits, which state-board bills print (e.g. plot "३८२") and OCR
+# preserves -- mapped to ASCII so a plot number can actually be compared.
+_DEVANAGARI_DIGITS = str.maketrans("०१२३४५६७८९", "0123456789")
 _ADDR_STATE_WORDS = {s.lower() for s in (
     "maharashtra", "gujarat", "karnataka", "kerala", "punjab", "haryana", "rajasthan",
     "delhi", "telangana", "assam", "goa", "bihar", "jharkhand", "odisha", "sikkim",
@@ -561,10 +626,22 @@ _ADDR_STATE_WORDS = {s.lower() for s in (
 
 def _norm_addr(s: str) -> str:
     """Collapse punctuation *inside* tokens before splitting, so 'M.I.D.C.' -> 'midc'
-    and 'G-100' -> 'g100' instead of shattering into single letters."""
-    s = (s or "").lower()
+    and 'G-100' -> 'g100' instead of shattering into single letters.
+
+    A separator BETWEEN TWO DIGITS is different: it joins the parts of a compound
+    premises number ('384-385', '12/3', '135/11/A/2') and is kept as '_' so the
+    token stays whole ('384_385') but can still be split into its parts. Simply
+    deleting it turned 'Plot No. 384-385' into '384385' -- six digits, which the
+    tokeniser then took for a PIN code -- and 'Sy. No. 12/3' into '123'."""
+    s = (s or "").lower().translate(_DEVANAGARI_DIGITS)
+    s = re.sub(r'(?<=\d)[.\-/\\](?=\d)', '_', s)
     s = re.sub(r'[.\-/\\]', '', s)
-    return re.sub(r'[^a-z0-9]+', ' ', s).strip()
+    return re.sub(r'[^a-z0-9_]+', ' ', s).strip('_ ')
+
+
+def _compound_parts(t: str) -> list:
+    """'384_385' -> ['384', '385']; '135_11a2' -> ['135', '11a2']; 'g100' -> ['g100']."""
+    return [p for p in t.split('_') if p]
 
 
 def _addr_token_sets(s: str):
@@ -573,10 +650,120 @@ def _addr_token_sets(s: str):
     pins = {t for t in toks if len(t) == 6 and t.isdigit()}
     premises = {t for t in toks
                 if t not in pins and any(c.isdigit() for c in t) and any(c.isalpha() for c in t)}
-    premises |= {t for t in toks if t.isdigit() and 1 <= len(t) <= 4}
+    # A bare 1-2 digit number is not a premises identifier: "Road Number 2" on a
+    # GST certificate and "Phase 2" on a bill both reduce to '2' and were being
+    # scored as the same premises (Sri Laxmi Steel, 2026-09-18).
+    premises |= {t for t in toks if t.isdigit() and 3 <= len(t) <= 5}
+    # A compound number counts whole ('384_385') and by its 3-5 digit parts, so
+    # 'Plot 384-385' and 'Plot 385' still meet.
+    for t in [t for t in toks if '_' in t]:
+        premises.add(t)
+        premises |= {p for p in _compound_parts(t) if p.isdigit() and 3 <= len(p) <= 5}
     places = {t for t in toks
               if t.isalpha() and len(t) >= 3 and t not in _ADDR_STATE_WORDS}
     return premises, places, pins
+
+
+# Words that introduce a plot / survey / door number in Indian addresses. The
+# number(s) right after one of these identify the specific premises. They come
+# in kinds: a survey number is a land-record identifier, a plot number an
+# estate's subdivision, a door number the building's -- 'Door No. 12' and
+# 'Sy. No. 12/3' name the same place on different registers, so numbers are
+# only compared against numbers of the same kind.
+_PLOT_KINDS = {
+    "plot": {"plot", "plno", "pl", "plotno"},
+    "survey": {"survey", "sy", "syno", "sno", "sf", "sfno", "ts", "tsno", "khasra", "gat", "hissa"},
+    "door": {"door", "flat", "shed", "unit", "gala", "house", "hno", "dno", "holding"},
+}
+_PLOT_KEYWORDS = {kw for kws in _PLOT_KINDS.values() for kw in kws}
+_PLOT_KIND_OF = {kw: kind for kind, kws in _PLOT_KINDS.items() for kw in kws}
+_PLOT_KIND_LABEL = {"plot": "plot no.", "survey": "survey no.", "door": "door/flat no."}
+
+
+def _premises_ids(s: str) -> dict:
+    """{kind: numbers} for every plot / survey / door number an address names:
+    each run of numeric tokens following a keyword of that kind (optionally via
+    'no'), compound numbers split into their parts. 'plot no 384 385' ->
+    {'plot': {'384', '385'}}; 'sy no 12/3' -> {'survey': {'12', '3'}};
+    'Road Number 2' -> {}."""
+    toks = _norm_addr(s).split()
+    out: dict = {}
+    i = 0
+    while i < len(toks):
+        if toks[i] in _PLOT_KEYWORDS:
+            kind = _PLOT_KIND_OF[toks[i]]
+            j = i + 1
+            while j < len(toks) and toks[j] in ("no", "nos", "number", "numbers"):
+                j += 1
+            while j < len(toks):
+                parts = _compound_parts(toks[j])
+                if not parts or not all(p.isdigit() and len(p) <= 5 for p in parts):
+                    break
+                out.setdefault(kind, set()).update(parts)
+                j += 1
+            i = max(j, i + 1)
+        else:
+            i += 1
+    return out
+
+
+def _plot_numbers(s: str) -> set:
+    """All plot / survey / door numbers an address names, regardless of kind."""
+    ids = _premises_ids(s) if s else {}
+    return set().union(*ids.values()) if ids else set()
+
+
+@dataclass
+class PlotComparison:
+    conflict: bool          # some kind is named on both sides and shares no number
+    comparable: bool        # False when both sides name numbers but of different kinds only
+    a: set
+    b: set
+    kinds_a: tuple = ()
+    kinds_b: tuple = ()
+
+    def incomparable_note(self, label_a: str, label_b: str) -> str:
+        ka = " and ".join(_PLOT_KIND_LABEL[k] for k in self.kinds_a)
+        kb = " and ".join(_PLOT_KIND_LABEL[k] for k in self.kinds_b)
+        return (f"the premises identifiers are of different kinds ({ka} on the {label_a}, {kb} on the {label_b}) "
+                "and cannot be compared -- may well be the same premises on two registers")
+
+
+def _compare_plots(a: str, b: str) -> PlotComparison:
+    """Kind-by-kind comparison of the premises numbers two addresses name. A
+    conflict -- the same kind named on both sides with nothing shared -- is the
+    strongest available evidence that two addresses in the same locality are
+    different premises. Numbers of different kinds are not evidence either way."""
+    ia, ib = _premises_ids(a or ""), _premises_ids(b or "")
+    common = set(ia) & set(ib)
+    conflict = any(not (ia[k] & ib[k]) for k in common)
+    comparable = bool(common) or not (ia and ib)
+    return PlotComparison(conflict=conflict, comparable=comparable,
+                          a=set().union(*ia.values()) if ia else set(),
+                          b=set().union(*ib.values()) if ib else set(),
+                          kinds_a=tuple(sorted(ia)), kinds_b=tuple(sorted(ib)))
+
+
+def _plots_conflict(a: str, b: str):
+    """-> (conflict: bool, plots_a, plots_b). See _compare_plots."""
+    c = _compare_plots(a, b)
+    return c.conflict, c.a, c.b
+
+
+def _place_overlap(a: set, b: set) -> set:
+    """Locality tokens in common, tolerating OCR that runs a place name into
+    its neighbours: a bill read as "I .D AJJEEDIMETLA" yields the token
+    'ajjeedimetla', which still contains the GST address's 'jeedimetla'.
+    Only names of 6+ letters may match by containment, so short words can't
+    hit inside unrelated longer ones."""
+    hits = a & b
+    for x in a:
+        if len(x) >= 6 and any(x in y for y in b if y != x):
+            hits.add(x)
+    for y in b:
+        if len(y) >= 6 and any(y in x for x in a if x != y):
+            hits.add(y)
+    return hits
 
 
 def _licensed_premises_note(bill_address: Optional[str], bill_village: Optional[str],
@@ -623,15 +810,36 @@ def resolve_addr_electricity_bill(gst_address: Optional[str], bill_address: Opti
 
     gst_pin = next(iter(gst_pins), None)
     bill_pin = (bill_pincode or next(iter(bill_pins), None))
-    premises_match = bool(gst_prem & bill_prem)
-    place_hits = gst_place & bill_place
+    # Two addresses that each name a plot / survey number, with none in common,
+    # are different premises however much else agrees -- same estate, same
+    # locality, same PIN is exactly what a neighbouring plot looks like
+    # (Sri Laxmi Steel, 2026-09-18: bill for plot 382, GST for plots 384-385,
+    # both IDA Jeedimetla; it scored 'match'). A conflict caps the outcome at
+    # minor_discrepancy and is stated in the note.
+    plots = _compare_plots(gst_address, " ".join(x for x in (bill_address, bill_village) if x))
+    plots_conflict, gst_plots, bill_plots = plots.conflict, plots.a, plots.b
+    premises_match = bool(gst_prem & bill_prem) and not plots_conflict
+    place_hits = _place_overlap(gst_place, bill_place)
+    # 'Door No. 12' on the bill and 'Sy. No. 12/3' on the certificate is neither
+    # a match nor a conflict; the note must say so instead of "could not be
+    # matched", which reads as a defect in the bill.
+    prem_unmatched_note = (plots.incomparable_note("GST certificate", "bill") if not plots.comparable
+                           else "the premises identifier could not be matched")
     # Does the bill's own consumer name identify the entity we're assessing?
     consumer = re.sub(r'^\s*m\s*/?\s*s\.?\s+', '', (bill_consumer_name or ""), flags=re.I)
     name_match = _name_match(consumer, entity_name or "") if consumer and entity_name else None
 
     evidence = []
-    if premises_match:
-        evidence.append(f"premises identifier matches ({'/'.join(sorted(gst_prem & bill_prem))})")
+    if plots_conflict:
+        evidence.append(f"DISCREPANCY: the bill is for plot/survey no. {'/'.join(sorted(bill_plots))} but the "
+                        f"GST-registered premises is plot/survey no. {'/'.join(sorted(gst_plots))} -- a different "
+                        "premises in the same area")
+    elif premises_match:
+        shared = gst_prem & bill_prem
+        # A compound number that matched whole ('135/11/A/2') is listed once, not
+        # also by its parts.
+        shared -= {p for t in shared if '_' in t for p in _compound_parts(t)}
+        evidence.append(f"premises identifier matches ({'/'.join(sorted(t.replace('_', '/') for t in shared))})")
     if place_hits:
         evidence.append(f"locality/city matches ({', '.join(sorted(place_hits))})")
     if name_match is True:
@@ -639,6 +847,17 @@ def resolve_addr_electricity_bill(gst_address: Optional[str], bill_address: Opti
 
     if gst_pin and bill_pin and gst_pin == bill_pin:
         evidence.append(f"PIN {gst_pin} matches")
+        if plots_conflict:
+            return Resolved.ok("minor_discrepancy", src, note="; ".join(evidence))
+        if not premises_match and not place_hits:
+            # A PIN covers a whole post-office area. On its own -- no premises
+            # number, no locality word in common -- it says "same neighbourhood",
+            # not "same address"; typically the bill's address text was
+            # unreadable and only the six digits survived OCR.
+            return Resolved.ok("minor_discrepancy", src,
+                                note="; ".join(evidence) + " but nothing else does -- no premises identifier "
+                                "or locality text in common (" + prem_unmatched_note + "); the bill's address "
+                                "text may not have been read; confirm against the document")
         return Resolved.ok("match", src, note="; ".join(evidence))
 
     if gst_pin and bill_pin and gst_pin != bill_pin:
@@ -667,14 +886,58 @@ def resolve_addr_electricity_bill(gst_address: Optional[str], bill_address: Opti
         return Resolved.ok("match", src, note="; ".join(evidence) + " (no PIN available on both sides to cross-check)")
     if place_hits:
         return Resolved.ok("minor_discrepancy", src,
-                            note="; ".join(evidence) + " but the premises identifier could not be matched")
+                            note="; ".join(evidence) + ("" if plots_conflict else f" but {prem_unmatched_note}"))
     lic_note = _licensed_premises_note(bill_address, bill_village, licensed_addresses)
     return Resolved.missing("Could not confidently compare the electricity bill address to the GST address "
                              "(no PIN on both sides, and no premises/locality token overlap)."
                              + (f" {lic_note}" if lic_note else ""))
 
 
-def resolve_addr_msme(api: ApiBundle, doc_udyam_number: Optional[str] = None) -> Resolved:
+def udyam_vs_gst_address_note(gst_address: Optional[str], udyam_address: Optional[str]) -> Optional[str]:
+    """The Udyam registration and the GST registration are two statutory
+    records of the same enterprise's address; when they name different
+    premises that is worth an analyst's attention even though no scored
+    parameter compares them. Returns a WARNING line (picked up as a
+    cross-check item by pipeline.find_cross_check_items) when the plot /
+    survey numbers conflict, a plain confirmation when they agree, None when
+    there is nothing to compare."""
+    if not gst_address or not udyam_address:
+        return None
+    plots = _compare_plots(gst_address, udyam_address)
+    conflict, gst_plots, udyam_plots = plots.conflict, plots.a, plots.b
+    _gp, gst_place, gst_pins = _addr_token_sets(gst_address)
+    _up, udyam_place, udyam_pins = _addr_token_sets(udyam_address)
+    same_locality = bool(_place_overlap(gst_place, udyam_place))
+    if not plots.comparable:
+        return ("Udyam and GST registrations: " + plots.incomparable_note("GST certificate", "Udyam certificate")
+                + ("; locality agrees" if same_locality else "; NOTE: no locality text in common either"))
+    if conflict:
+        where = ("in the same locality" if same_locality else "in a different locality")
+        return (f"WARNING: the Udyam registration gives the enterprise's address as plot/survey no. "
+                f"{'/'.join(sorted(udyam_plots))} but the GST certificate registers plot/survey no. "
+                f"{'/'.join(sorted(gst_plots))} ({where}) -- two statutory registrations naming different "
+                "premises; confirm which is the operating address.")
+    if gst_plots and udyam_plots:
+        return "Udyam and GST registrations name the same premises."
+    if same_locality and gst_pins and udyam_pins and gst_pins == udyam_pins:
+        return "Udyam and GST registrations agree on locality and PIN."
+    if not same_locality:
+        return ("WARNING: the Udyam registration's address and the GST-registered address share no locality "
+                "text -- two statutory registrations may name different premises; confirm which is the "
+                "operating address.")
+    return None
+
+
+def resolve_addr_msme(api: ApiBundle, doc_udyam_number: Optional[str] = None,
+                      gst_address: Optional[str] = None, udyam_address: Optional[str] = None) -> Resolved:
+    r = _resolve_addr_msme_status(api, doc_udyam_number)
+    cross = udyam_vs_gst_address_note(gst_address, udyam_address)
+    if cross:
+        r.note = f"{r.note} | {cross}" if r.note else cross
+    return r
+
+
+def _resolve_addr_msme_status(api: ApiBundle, doc_udyam_number: Optional[str]) -> Resolved:
     udyam = _first(api.ongrid_msme, "udyam_number")
     if udyam:
         return Resolved.ok("valid_active", "ongrid.msme.fetch-by-pan.udyam_number")
@@ -1107,17 +1370,7 @@ def resolve_all(entity: dict, docs, api: ApiBundle) -> dict:
         factory_license_address=entity.get("factory_premises_address"),
         pcb_address=entity.get("pcb_premises_address"))
 
-    if not ownership_resolved.unresolved and ownership_resolved.value == "owned":
-        # ScoringModel.json's own instruction: "For owned premises score full" --
-        # independent of whether we could also OCR-match the electricity bill address.
-        rental_validation_resolved = Resolved.ok("owned", "derived from addr_ownership_type=owned",
-                                                   note="Full score for owned premises per ScoringModel.json rule")
-    elif not ownership_resolved.unresolved and ownership_resolved.value in ("rented", "leased") \
-            and not electricity_resolved.unresolved and electricity_resolved.value == "match":
-        rental_validation_resolved = Resolved.ok("rented_matching", "addr_ownership_type + addr_electricity_bill")
-    else:
-        rental_validation_resolved = Resolved.missing(
-            "Ownership type unresolved, or rented without a confirmed matching electricity-bill address")
+    rental_validation_resolved = resolve_addr_rental_validation(ownership_resolved, electricity_resolved)
 
     out = {
         "com_gstin_active": gstin_active_resolved,
@@ -1132,7 +1385,8 @@ def resolve_all(entity: dict, docs, api: ApiBundle) -> dict:
         "addr_ownership_type": ownership_resolved,
         "addr_electricity_bill": electricity_resolved,
         "addr_rental_validation": rental_validation_resolved,
-        "addr_msme": resolve_addr_msme(api, entity.get("udyam_number")),
+        "addr_msme": resolve_addr_msme(api, entity.get("udyam_number"),
+                                       gst_address=entity.get("address"), udyam_address=entity.get("udyam_address")),
         "addr_landlord_declaration": resolve_addr_landlord_declaration(
             ownership_resolved, docs.has("landlord_declaration")),
         "ident_pan_active": resolve_ident_pan_active(api, gstin_active_resolved.value),

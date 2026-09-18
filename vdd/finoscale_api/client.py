@@ -36,6 +36,12 @@ class FinoscaleClient:
     base_url: str = "https://api-ppe.finoscale.ai"
     cache_dir: Optional[str] = None
     timeout: float = 30.0
+    # A cached response older than this is refetched. Registry facts change --
+    # a GSTIN cancelled last week still read "Active" from a months-old cache
+    # entry, with nothing in the report to say so. 0 disables expiry.
+    cache_max_age_days: float = 7.0
+    # Hits and refetches this client has served, for the run summary.
+    cache_stats: dict = field(default_factory=lambda: {"hits": 0, "stale_refetched": 0, "fetched": 0})
     session: requests.Session = field(default_factory=requests.Session)
 
     # ---------------------------------------------------------------- core
@@ -52,12 +58,27 @@ class FinoscaleClient:
         cache_path = self._cache_path(cache_key) if cache_key else None
         if cache_path and os.path.exists(cache_path):
             with open(cache_path, encoding="utf-8") as f:
-                return json.load(f)["data"]
+                cached = json.load(f)
+            age_days = (time.time() - float(cached.get("_fetched_at") or 0)) / 86400
+            if not self.cache_max_age_days or age_days <= self.cache_max_age_days:
+                self.cache_stats["hits"] += 1
+                return cached["data"]
+            stale = cached
+        else:
+            stale = None
 
         url = self.base_url.rstrip("/") + path
         headers = {"X-Api-Key": self.api_key, "Content-Type": "application/json"}
-        resp = self.session.request(method, url, params=params, json=json_body,
-                                     headers=headers, timeout=self.timeout)
+        try:
+            resp = self.session.request(method, url, params=params, json=json_body,
+                                         headers=headers, timeout=self.timeout)
+        except requests.RequestException:
+            if stale is not None:
+                # The network failed and we hold an expired answer: an old fact
+                # beats no fact, but it is served as what it is.
+                self.cache_stats["stale_served_offline"] = self.cache_stats.get("stale_served_offline", 0) + 1
+                return stale["data"]
+            raise
         try:
             data = resp.json()
         except ValueError:
@@ -66,6 +87,7 @@ class FinoscaleClient:
         if resp.status_code >= 400:
             msg = data.get("message") if isinstance(data, dict) else str(data)
             raise FinoscaleAPIError(resp.status_code, msg or "request failed", path, data)
+        self.cache_stats["stale_refetched" if stale is not None else "fetched"] += 1
 
         if cache_path:
             with open(cache_path, "w", encoding="utf-8") as f:
