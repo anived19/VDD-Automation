@@ -25,7 +25,8 @@ load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
 from flask import Flask, request, jsonify, send_from_directory, Response
 
 from vdd.finoscale_api.client import FinoscaleClient
-from vdd.pipeline import run_vendor
+from vdd.pipeline import finalise_vendor, run_vendor
+from vdd.review_sheet import ReviewSheetError
 
 UPLOADS = os.path.join(BASE, "uploads")
 OUT_DIR = os.path.join(PROJECT_ROOT, "out")
@@ -83,22 +84,7 @@ def api_run():
     files = request.files.getlist("files")
     if not files:
         return jsonify({"error": "No files were uploaded."}), 400
-
-    first_rel = files[0].filename.replace("\\", "/")
-    vendor_name = first_rel.split("/")[0] if "/" in first_rel else os.path.splitext(first_rel)[0]
-    vendor_name = "".join(c if c.isalnum() or c in "_- " else "_" for c in vendor_name).strip() or "VENDOR"
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    vendor_dir = os.path.join(UPLOADS, f"{ts}_{vendor_name}")
-    os.makedirs(vendor_dir, exist_ok=True)
-
-    saved = 0
-    for f in files:
-        rel = (f.filename or "").replace("\\", "/")
-        base = rel.split("/")[-1]
-        if not base:
-            continue
-        f.save(os.path.join(vendor_dir, base))
-        saved += 1
+    vendor_dir, saved = _save_uploads(files)
     if saved == 0:
         return jsonify({"error": "No usable files in the upload."}), 400
 
@@ -109,11 +95,16 @@ def api_run():
     except Exception as e:
         return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
 
-    return jsonify({
+    return jsonify(_result_json(result, client))
+
+
+def _result_json(result, client) -> dict:
+    return {
         "vendor_name": result.vendor_name,
         "score": result.score,
         "html_report_url": (f"/report/{os.path.basename(result.html_path)}" if result.html_path else None),
         "pdf_report_url": (f"/report/{os.path.basename(result.pdf_path)}" if result.pdf_path else None),
+        "review_sheet_url": (f"/report/{os.path.basename(result.sheet_path)}" if result.sheet_path else None),
         "missing_documents": result.missing_documents,
         "unresolved_fields": result.unresolved_fields,
         "cross_check_items": result.cross_check_items,
@@ -129,7 +120,50 @@ def api_run():
             "review_error": result.review_error,
         },
         "finoscale_api_connected": client is not None,
-    })
+    }
+
+
+def _save_uploads(files) -> tuple:
+    """-> (vendor_dir, saved_count). Same layout /api/run has always used."""
+    first_rel = files[0].filename.replace("\\", "/")
+    vendor_name = first_rel.split("/")[0] if "/" in first_rel else os.path.splitext(first_rel)[0]
+    vendor_name = "".join(c if c.isalnum() or c in "_- " else "_" for c in vendor_name).strip() or "VENDOR"
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    vendor_dir = os.path.join(UPLOADS, f"{ts}_{vendor_name}")
+    os.makedirs(vendor_dir, exist_ok=True)
+    saved = 0
+    for f in files:
+        base = (f.filename or "").replace("\\", "/").split("/")[-1]
+        if base:
+            f.save(os.path.join(vendor_dir, base))
+            saved += 1
+    return vendor_dir, saved
+
+
+@app.route("/api/finalise", methods=["POST"])
+def api_finalise():
+    """The analyst's edited review workbook + the vendor's documents -> the
+    final PDF and an updated workbook. The LLM review is not re-run."""
+    files = request.files.getlist("files")
+    sheet = request.files.get("sheet")
+    if not files or sheet is None:
+        return jsonify({"error": "Upload the vendor's documents as 'files' and the edited review workbook as 'sheet'."}), 400
+    vendor_dir, saved = _save_uploads(files)
+    if saved == 0:
+        return jsonify({"error": "No usable files in the upload."}), 400
+    sheet_path = os.path.join(vendor_dir, "_review_sheet.xlsx")
+    sheet.save(sheet_path)
+
+    client = _build_client()
+    try:
+        result = finalise_vendor(vendor_dir, sheet_path, OUT_DIR, client=client,
+                                 scoring_model_path=os.path.join(PROJECT_ROOT, "config", "scoring_model.json"),
+                                 analyst=request.form.get("analyst") or None)
+    except ReviewSheetError as e:
+        return jsonify({"error": str(e), "kind": "review_sheet"}), 422
+    except Exception as e:
+        return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
+    return jsonify(_result_json(result, client))
 
 
 @app.route("/report/<path:filename>")

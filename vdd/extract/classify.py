@@ -14,11 +14,25 @@ DOC_TYPE_PATTERNS: Dict[str, List[str]] = {
     "gst_portal": [r"gst[\s_-]*portal", r"gst[\s_-]*snap", r"gst\s*proof",
                    r"bank\s*detail", r"new\s*b[an]?ak?\s*detail"],
     "cancelled_cheque": [r"cancel+ed?[\s_-]*cheque", r"cancel\s*cheque", r"\bcheque\b"],
-    "pan_owner": [r"owner[\s_-]*pan", r"director[\s_-]*pan"],
-    "pan_entity": [r"entity[\s_-]*pan", r"company[\s_-]*pan", r"\bpan\s*card\b"],
-    "msme_certificate": [r"\bmsme\b", r"\budyam\b"],
+    "pan_owner": [r"owner[\s_-]*pan", r"director[\s_-]*pan", r"partner[\s_-]*pan", r"proprietor[\s_-]*pan"],
+    # A bare "pan" token ("BRT_pan.pdf", "B.P.RAY_PAN.pdf") is a PAN card whose
+    # owner-vs-entity role the filename can't tell; pipeline.extract_entity
+    # routes it by comparing the card's PAN with the GSTIN-derived one.
+    "pan_entity": [r"entity[\s_-]*pan", r"company[\s_-]*pan", r"\bpan\s*card\b", r"(?<![a-z])pan(?![a-z])"],
+    # (?<![a-z]) rather than \b: "_" is a word character, so \bmsme\b never
+    # matched "B._R._Trading_Co._Udyam_Registration_Certificate.pdf".
+    "msme_certificate": [r"(?<![a-z])msme(?![a-z])", r"(?<![a-z])udyam(?![a-z])"],
     "kyc_form": [r"\bkyc\b"],
-    "electricity_bill": [r"electricity", r"electric[\s_-]*bill", r"e[\s_-]*bill"],
+    # `elec\w*` absorbs the misspellings real folders arrive with ("electrity
+    # bill", "electricty bill"); "power bill" / "current bill" / "EB bill" are
+    # what the same document is called in everyday Indian English; the last
+    # group is the state DISCOMs whose portals name exported bills after
+    # themselves.
+    "electricity_bill": [r"electricity", r"elec\w*[\s_-]*bill", r"e[\s_-]*bill", r"power[\s_-]*bill",
+                         r"current[\s_-]*bill", r"\beb[\s_-]*bill",
+                         r"(?<![a-z])(tsspdcl|tgspdcl|tsnpdcl|apspdcl|apepdcl|apcpdcl|bescom|tneb|tangedco|msedcl|"
+                         r"mahadiscom|kseb|bses|cesc|pspcl|wbsedcl|uhbvn|dhbvn|mgvcl|pgvcl|ugvcl|dgvcl|"
+                         r"torrent[\s_-]*power|adani[\s_-]*electricity|tata[\s_-]*power)(?![a-z])"],
     # Ownership / occupancy proof. Classified ahead of rental_agreement below so a
     # "Proof of Premises - Sale Deed.pdf" isn't mistaken for a tenancy document.
     "sale_deed": [r"sale[\s_-]*deed", r"property[\s_-]*tax", r"index[\s_-]*ii", r"7\s*/\s*12\s*extract"],
@@ -66,10 +80,26 @@ CONTENT_SIGNATURES: List[tuple] = [
     ("cancelled_cheque", [("ifsc", r"a\s*/?\s*c\s*no"), ("ifs code", r"a\s*/?\s*c\s*no"),
                            "payable at par at all branches"]),
     ("aadhaar", ["unique identification authority", ("aadhaar", "government of india")]),
-    ("pan_entity", [("income tax department", "permanent account number"),
-                    ("permanent account number", r"\b[a-z]{5}\d{4}[a-z]\b")]),
+    # OCR on a scanned card reads the header as "INCOMIZ TAX DEPARTMENI",
+    # "GOYT. Of INDIA", "PErmanent Account Numiber" (2026-09-17, two real cards)
+    # -- so the phrases are matched by their stable stems, and a well-formed
+    # PAN next to a govt/income-tax header, or a date, is enough on its own.
+    ("pan_entity", [(r"income\s*tax\s*dep\w*", r"permanent\s*account\s*num\w*"),
+                    (r"permanent\s*account\s*num\w*", r"\b[a-z]{5}\d{4}[a-z]\b"),
+                    (r"go[vy]t\.?\s*of\s*india", r"permanent\s*account\s*num\w*"),
+                    (r"go[vy]t\.?\s*of\s*india", r"\b[a-z]{5}\d{4}[a-z]\b"),
+                    (r"income\s*tax\s*dep\w*", r"\b[a-z]{5}\d{4}[a-z]\b")]),
     ("electricity_bill", ["electricity bill", "vidyut vitran", "विद्युत वितरण", "वीज बिल", "बिजली बिल", "ವಿದ್ಯುತ್ ಬಿಲ್", "ಬೆಸ್ಕಾಂ", "విద్యుత్ బిల్లు", "மின் கட்டண ரசீது", ("sanctioned load", "billed demand"),
-                           ("kwh", "meter number"), ("kwh", "sanctioned load")]),
+                           ("kwh", "meter number"), ("kwh", "sanctioned load"),
+                           # DISCOM bill layouts that never say "electricity" anywhere
+                           # (seen 2026-09-17 on a TSSPDCL bill: Consumer Name / Unique
+                           # Service Number / Service Number / ERO / Current Month Bill).
+                           # Each group pairs a consumer/service label with a second
+                           # label no other document type in this pipeline carries.
+                           "unique service number", r"\bkwh\b", "connected load", "contracted demand",
+                           ("consumer name", "service number"), ("consumer number", r"units"),
+                           ("consumer no", r"units"), (r"\bero\b", "service number"),
+                           ("current month bill", "consumer")]),
     ("trade_licence", ["shops and commercial establishment", "registration certificate of shop",
                         "trade licence", "trade license"]),
     ("rental_agreement", ["lessor", "lessee", "this rental agreement", "this lease agreement"]),

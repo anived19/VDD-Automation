@@ -95,6 +95,9 @@ class VendorRunResult:
     # caught, which classify_folder() never sees.
     docs: Optional["ClassifiedDocs"] = None
     review_trace_path: Optional[str] = None
+    # The analyst review workbook (vdd/review_sheet.py) written next to the
+    # report -- the file an analyst edits and sends back to finalise_vendor.
+    sheet_path: Optional[str] = None
     # {"input_tokens", "output_tokens", "total_tokens", "llm_call_count"} summed
     # across every review pass -- None when review didn't run (see _run_review).
     token_usage: Optional[dict] = None
@@ -187,6 +190,67 @@ def _apply_manual_overrides(vendor_name: str, resolved: dict) -> None:
         o["value"], "manual-override:analyst-reference-report", note=o.get("note", ""))
 
 
+def _edit_distance(a: str, b: str) -> int:
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+def _garbled_pan_match(text: str, gstin_pan: str) -> bool:
+    """Does an OCR'd card carry a token that is plainly a bad read of
+    `gstin_pan`? A scanned firm card (B R Trading Co, 2026-09-17) came back
+    as "AADFE03u9Ci" for AADFB0389G -- no clean PAN anywhere, yet obviously
+    the entity's card. Same first three letters plus edit distance <= 4 over
+    a 10-11 char token; the value itself is never taken from such a read."""
+    for tok in re.findall(r'[A-Za-z0-9]{9,12}', text):
+        t = tok.upper()
+        if t[:3] == gstin_pan[:3] and _edit_distance(t, gstin_pan) <= 4:
+            return True
+    return False
+
+
+def _route_pan_cards(docs: ClassifiedDocs, text_of, warnings: List[str]) -> None:
+    """A filename like "BRT_pan.pdf" or "B.P.RAY_PAN.pdf" (or a content-classified
+    card) lands as pan_entity because a filename can't say whose card it is.
+    The GST certificate can: chars 3-12 of the GSTIN are the entity's PAN.
+    A card carrying that PAN (cleanly, or as a recognisable OCR garble) is the
+    entity's; a card carrying a different, cleanly-read PAN is an owner's /
+    partner's and moves to pan_owner. Two cards both left as pan_entity would
+    otherwise overwrite each other's name in the merge below -- the partner's
+    name would have become the "entity PAN name". Without a GST certificate
+    nothing is moved."""
+    from vdd.extract.parsers import PAN_RE, parse_document as _parse
+    gstin_pan = None
+    for f in docs.get("gst_certificate"):
+        gstin_pan = _parse("gst_certificate", text_of(f)).get("pan")
+        if gstin_pan:
+            break
+    if not gstin_pan or not docs.get("pan_entity"):
+        return
+    entity_cards, owner_cards = [], []
+    for f in docs.get("pan_entity"):
+        text = text_of(f)
+        m = PAN_RE.search(text)
+        pan = m.group(0) if m else None
+        if pan == gstin_pan or (pan is None and _garbled_pan_match(text, gstin_pan)):
+            entity_cards.append(f)
+        elif pan:
+            owner_cards.append(f)
+            warnings.append(f"{os.path.basename(f)}: PAN card carries {pan}, not the entity's GSTIN-derived "
+                             f"{gstin_pan} -- treated as an owner/partner PAN card")
+        else:
+            entity_cards.append(f)
+    docs.by_type["pan_entity"] = entity_cards
+    if not entity_cards:
+        docs.by_type.pop("pan_entity", None)
+    if owner_cards:
+        docs.by_type.setdefault("pan_owner", []).extend(owner_cards)
+
+
 def extract_entity(docs: ClassifiedDocs, warnings: List[str], cache_dir: Optional[str] = None) -> dict:
     # Content-based fallback for files the filename regex couldn't place --
     # e.g. "WhatsApp Image 2026-08-13 at 2.44.58 PM.jpeg" carries zero
@@ -194,15 +258,20 @@ def extract_entity(docs: ClassifiedDocs, warnings: List[str], cache_dir: Optiona
     # card. Mutates `docs` in place (moves the file from unmatched into
     # by_type) so the existing extraction loop below picks it up naturally,
     # and so downstream `docs.has(...)` presence checks in resolvers.py see
-    # the corrected classification too. This means a file that was originally
-    # unmatched gets its text extracted twice (once here, once in the loop
-    # below) -- an acceptable cost for the rare unmatched case, not worth the
-    # extra plumbing to dedupe for what should be a small list.
+    # the corrected classification too. Extraction results are memoised per
+    # file: OCR (EasyOCR, CPU) is the slow step, and a file can now be read
+    # here, again by _route_pan_cards, and again in the loop below.
     cin_found = None
+    texts: dict = {}
+
+    def text_of(f: str):
+        if f not in texts:
+            texts[f] = extract_text(f, cache_dir=cache_dir)
+        return texts[f]
 
     still_unmatched = []
     for f in docs.unmatched:
-        r = extract_text(f, cache_dir=cache_dir)
+        r = text_of(f)
         if cin_found is None and r.text:
             m = _CIN_RE.search(r.text)
             if m:
@@ -218,12 +287,15 @@ def extract_entity(docs: ClassifiedDocs, warnings: List[str], cache_dir: Optiona
                                  f"unavailable -- could not attempt content-based classification")
             still_unmatched.append(f)
     docs.unmatched = still_unmatched
+    _route_pan_cards(docs, lambda f: text_of(f).text or "", warnings)
 
     doc_data = {}
     for doc_type, files in docs.by_type.items():
         for f in files:
-            r = extract_text(f, cache_dir=cache_dir)
-            if cin_found is None and r.text:
+            r = text_of(f)
+            # A utility bill prints the *utility's* CIN (CESC Limited's, on B R
+            # Trading Co's bill, 2026-09-17) -- never the vendor's.
+            if cin_found is None and r.text and doc_type != "electricity_bill":
                 m = _CIN_RE.search(r.text)
                 if m:
                     cin_found = m.group(0)
@@ -303,8 +375,23 @@ def extract_entity(docs: ClassifiedDocs, warnings: List[str], cache_dir: Optiona
         entity["factory_premises_address"] = doc_data["factory_license"]["premises_address"]
     if doc_data.get("pcb_certificate", {}).get("premises_address"):
         entity["pcb_premises_address"] = doc_data["pcb_certificate"]["premises_address"]
+    # The Udyam registration's own address -- kept separate from the GST one
+    # (never merged into `address`) so resolve_addr_msme can compare the two
+    # statutory registrations against each other.
+    if doc_data.get("msme_certificate", {}).get("address"):
+        entity["udyam_address"] = doc_data["msme_certificate"]["address"]
     if cin_found:
-        entity["cin"] = cin_found
+        # Only a company or LLP has a CIN. For any other constitution a CIN
+        # found on some document belongs to someone else (a bank, a utility,
+        # a customer on a letterhead), and passing it to the CIN-keyed Probe42
+        # endpoints would fetch a different company's compliance record.
+        constitution = (entity.get("constitution") or "").lower()
+        if constitution and not any(k in constitution for k in ("private", "public", "limited", "llp", "company")):
+            warnings.append(f"CIN {cin_found} found in the document set was ignored: the GST certificate says "
+                             f"the entity is a {entity['constitution']}, which has no CIN -- it belongs to some "
+                             f"other organisation named in the documents")
+        else:
+            entity["cin"] = cin_found
 
     return entity
 
@@ -485,9 +572,36 @@ def fetch_api_data(client: Optional[FinoscaleClient], entity: dict, vendor_name:
     return bundle
 
 
+def _apply_doc_type_overrides(docs: ClassifiedDocs, overrides: dict, warnings: List[str]) -> None:
+    """Analyst corrections from the review sheet's Documents tab: move each
+    named file to the given type before anything is extracted. 'ignore' drops
+    the file from the run. A filename that isn't in the folder is reported,
+    not silently skipped."""
+    all_paths = [p for paths in docs.by_type.values() for p in paths] + list(docs.unmatched)
+    by_name = {os.path.basename(p): p for p in all_paths}
+    for fname, dtype in overrides.items():
+        path = by_name.get(fname)
+        if path is None:
+            warnings.append(f"Review sheet: '{fname}' is not in the document folder -- its type correction was ignored")
+            continue
+        for paths in docs.by_type.values():
+            if path in paths:
+                paths.remove(path)
+        if path in docs.unmatched:
+            docs.unmatched.remove(path)
+        if dtype == "ignore":
+            warnings.append(f"Review sheet: '{fname}' excluded from the run (marked 'ignore' by the analyst)")
+        else:
+            docs.by_type.setdefault(dtype, []).append(path)
+            warnings.append(f"Review sheet: '{fname}' treated as '{dtype}' (analyst correction)")
+    for dtype in [d for d, paths in docs.by_type.items() if not paths]:
+        del docs.by_type[dtype]
+
+
 def compute_vendor_data(docs_path: str, client: Optional[FinoscaleClient] = None,
                          scoring_model_path: str = "config/scoring_model.json",
-                         ocr_cache_dir: str = "cache") -> VendorComputation:
+                         ocr_cache_dir: str = "cache",
+                         doc_type_overrides: Optional[dict] = None) -> VendorComputation:
     """Everything up to and including build_context() -- no rendering. Split
     out of run_vendor so the LLM review graph can be invoked in between this
     and the final HTML/PDF write."""
@@ -495,6 +609,8 @@ def compute_vendor_data(docs_path: str, client: Optional[FinoscaleClient] = None
     docs = classify_folder(docs_path)
 
     warnings: List[str] = []
+    if doc_type_overrides:
+        _apply_doc_type_overrides(docs, doc_type_overrides, warnings)
     entity = extract_entity(docs, warnings, cache_dir=ocr_cache_dir)
 
     missing = [dt for dt in REQUIRED_DOC_TYPES if not docs.has(dt)]
@@ -570,6 +686,8 @@ def _run_review(computed: VendorComputation, client: Optional[FinoscaleClient],
         review_trace_path = write_review_trace(computed.vendor_name, out_dir, final_state)
         return {
             "context": final_state["context"],
+            "entity": final_state.get("entity", computed.entity),
+            "resolved": final_state.get("resolved", computed.resolved),
             "reviewed": True,
             "approved": final_state.get("approved", False),
             "review_iterations": max(0, final_state.get("iteration", 1) - 1),
@@ -583,10 +701,57 @@ def _run_review(computed: VendorComputation, client: Optional[FinoscaleClient],
         return {"context": computed.context, "review_error": str(e)}
 
 
+def _render(context: dict, out_dir: str, warnings: List[str], write_html: bool):
+    """PDF, with the HTML-only fallback when weasyprint's system libs are missing."""
+    try:
+        return generate_report(context, out_dir, write_html=write_html)
+    except Exception:
+        try:
+            html_path, _ = generate_report(context, out_dir, html_only=True)
+            warnings.append("PDF rendering failed (weasyprint/system libs) -- HTML report generated instead: "
+                             + traceback.format_exc(limit=1).splitlines()[-1])
+            return html_path, None
+        except Exception as e2:
+            warnings.append(f"Report generation failed entirely: {e2}")
+            return None, None
+
+
+def _write_sheet(computed: VendorComputation, entity: dict, resolved: dict, scoring_model_path: str,
+                 out_dir: str, warnings: List[str], review_fields: dict, *, audit_rows: list = (),
+                 analyst_name: str = "", cross_check_items: Optional[list] = None) -> Optional[str]:
+    """The analyst review workbook -- see vdd/review_sheet.py. Never fatal: a
+    workbook failure is reported in the warnings, the PDF still stands."""
+    from vdd.review_sheet import write_review_workbook
+    try:
+        engine = ScoringEngine(scoring_model_path)
+        result = engine.score_no_consent(resolved)
+        safe = re.sub(r'[^A-Za-z0-9]+', '_', computed.vendor_name).strip('_').upper() or "VENDOR"
+        if review_fields.get("reviewed"):
+            summary = (f"{review_fields.get('review_iterations', 0)} pass(es), "
+                       f"{'approved' if review_fields.get('approved') else 'not approved'}")
+        elif review_fields.get("review_error"):
+            summary = f"failed: {review_fields['review_error'][:120]}"
+        else:
+            summary = "not run"
+        return write_review_workbook(
+            os.path.join(out_dir, f"{safe}_review.xlsx"), vendor_name=computed.vendor_name, entity=entity,
+            resolved=resolved, result=result, docs=computed.docs, model=engine.model,
+            scoring_model_path=scoring_model_path, original_resolved=computed.resolved,
+            cross_check_items=(list(computed.cross_check_items) if cross_check_items is None else list(cross_check_items)),
+            unresolved_fields=[pid for pid, r in resolved.items() if r.unresolved],
+            missing_documents=computed.missing_documents, api_errors=computed.api_errors, warnings=warnings,
+            llm_findings=review_fields.get("escalations_for_human", []),
+            llm_corrections=review_fields.get("corrections_applied", []), review_summary=summary,
+            audit_rows=list(audit_rows), analyst_name=analyst_name)
+    except Exception as e:
+        warnings.append(f"Review workbook could not be written: {e}")
+        return None
+
+
 def run_vendor(docs_path: str, out_dir: str, client: Optional[FinoscaleClient] = None,
                scoring_model_path: str = "config/scoring_model.json",
                ocr_cache_dir: str = "cache", review: bool = True,
-               max_review_iterations: Optional[int] = None) -> VendorRunResult:
+               max_review_iterations: Optional[int] = None, write_html: bool = False) -> VendorRunResult:
     computed = compute_vendor_data(docs_path, client, scoring_model_path, ocr_cache_dir)
     warnings = list(computed.warnings)
 
@@ -595,19 +760,11 @@ def run_vendor(docs_path: str, out_dir: str, client: Optional[FinoscaleClient] =
         review_fields = _run_review(computed, client, scoring_model_path, out_dir,
                                      max_review_iterations, warnings)
     context = review_fields["context"]
+    entity = review_fields.get("entity", computed.entity)
+    resolved = review_fields.get("resolved", computed.resolved)
 
-    html_path, pdf_path = None, None
-    try:
-        html_path, pdf_path = generate_report(context, out_dir)
-    except Exception:
-        # PDF rendering can fail purely on missing system libs (e.g. weasyprint's
-        # GTK/Pango/Cairo deps aren't installed) -- still emit the HTML.
-        try:
-            html_path, _ = generate_report(context, out_dir, html_only=True)
-            warnings.append("PDF rendering failed (weasyprint/system libs) -- HTML report generated instead: "
-                             + traceback.format_exc(limit=1).splitlines()[-1])
-        except Exception as e2:
-            warnings.append(f"Report generation failed entirely: {e2}")
+    html_path, pdf_path = _render(context, out_dir, warnings, write_html)
+    sheet_path = _write_sheet(computed, entity, resolved, scoring_model_path, out_dir, warnings, review_fields)
 
     return VendorRunResult(
         vendor_name=computed.vendor_name, html_path=html_path, pdf_path=pdf_path, score=context["score"],
@@ -618,5 +775,47 @@ def run_vendor(docs_path: str, out_dir: str, client: Optional[FinoscaleClient] =
         corrections_applied=review_fields.get("corrections_applied", []),
         escalations_for_human=review_fields.get("escalations_for_human", []),
         review_error=review_fields.get("review_error"), review_trace_path=review_fields.get("review_trace_path"),
-        docs=computed.docs, token_usage=review_fields.get("token_usage"),
+        docs=computed.docs, token_usage=review_fields.get("token_usage"), sheet_path=sheet_path,
+    )
+
+
+def finalise_vendor(docs_path: str, sheet_path: str, out_dir: str, client: Optional[FinoscaleClient] = None,
+                    scoring_model_path: str = "config/scoring_model.json", ocr_cache_dir: str = "cache",
+                    analyst: Optional[str] = None, write_html: bool = False) -> VendorRunResult:
+    """Rebuild the report from the documents plus an analyst's edited review
+    workbook. The LLM review is NOT re-run: its corrections travel in the
+    sheet and are re-applied unless the analyst overrode them. Raises
+    vdd.review_sheet.ReviewSheetError, listing every problem, if the sheet
+    contains a value the scoring model can't accept -- nothing is generated
+    in that case."""
+    from vdd.review_sheet import apply_review_sheet, read_review_workbook
+
+    sheet = read_review_workbook(sheet_path)
+    engine = ScoringEngine(scoring_model_path)
+    computed = compute_vendor_data(docs_path, client, scoring_model_path, ocr_cache_dir,
+                                   doc_type_overrides=sheet.doc_overrides)
+    warnings = list(computed.warnings)
+    who = analyst or sheet.analyst_name or "analyst"
+    applied = apply_review_sheet(computed.entity, computed.resolved, sheet, engine.model, analyst=who)
+    from vdd.review_sheet import scoring_model_hash
+    if sheet.model_hash and sheet.model_hash != scoring_model_hash(scoring_model_path):
+        warnings.append(f"The scoring model changed since this sheet was issued (sheet {sheet.model_hash}, "
+                        f"current {scoring_model_hash(scoring_model_path)}) -- scores were computed with the current model")
+
+    result = engine.score_no_consent(applied.resolved)
+    context = build_context(applied.entity, result)
+    html_path, pdf_path = _render(context, out_dir, warnings, write_html)
+    # Recomputed from the applied state: a judgment call the analyst has now
+    # settled must not be re-raised as if it were still open.
+    cross_check = find_cross_check_items(applied.resolved) + applied.stale
+    review_fields = {"reviewed": False, "corrections_applied": applied.records}
+    new_sheet = _write_sheet(computed, applied.entity, applied.resolved, scoring_model_path, out_dir, warnings,
+                             review_fields, audit_rows=list(sheet.audit_rows) + applied.audit_rows,
+                             analyst_name=sheet.analyst_name, cross_check_items=cross_check)
+
+    return VendorRunResult(
+        vendor_name=computed.vendor_name, html_path=html_path, pdf_path=pdf_path, score=context["score"],
+        unresolved_fields=[pid for pid, r in applied.resolved.items() if r.unresolved],
+        missing_documents=computed.missing_documents, extraction_warnings=warnings, api_errors=computed.api_errors,
+        cross_check_items=cross_check, corrections_applied=applied.records, docs=computed.docs, sheet_path=new_sheet,
     )

@@ -119,7 +119,7 @@ def _get_easyocr_reader(langs: list[str]):
     """Lazily initialize one shared EasyOCR reader per script family.
     gpu=False since this is a CPU dev machine; correctness matters far more
     than speed here."""
-    global _easyocr_readers, _easyocr_missing
+    global _easyocr_missing
     if _easyocr_missing:
         return None
         
@@ -159,22 +159,22 @@ def _easyocr_best_rotation(img) -> tuple[str, float, int]:
     import numpy as np
     from PIL import ImageOps
     img = ImageOps.exif_transpose(img).convert("RGB")
-    
+
     # 1. Fast English-only brute-force rotation check
-    best_text, best_score, best_angle = "", 0.0, 0
+    best_kept, best_score, best_angle = [], 0.0, 0
     for angle in (0, 90, 180, 270):
         rotated = img.rotate(angle, expand=True) if angle else img
         results = en_reader.readtext(np.array(rotated), detail=1)
-        parts = [t for (_bbox, t, conf) in results if conf >= 0.4]
-        score = sum(len(t) for t in parts)
+        kept = [(bbox, t, conf) for (bbox, t, conf) in results if conf >= 0.4]
+        score = sum(len(t) for (_b, t, _c) in kept)
         if score > best_score:
-            best_score, best_text, best_angle = score, "\n".join(parts), angle
+            best_score, best_kept, best_angle = score, kept, angle
 
-    if not best_text:
+    if not best_kept:
         return "", 0.0, 0
 
     # 2. Dynamic State Detection
-    t = best_text.lower()
+    t = " ".join(txt for (_b, txt, _c) in best_kept).lower()
     if "karnataka" in t or "bescom" in t or "hescom" in t or "bangalore" in t or "bengaluru" in t:
         regional_langs = ["en", "kn"]
     elif "tamil nadu" in t or "tangedco" in t or "chennai" in t:
@@ -184,17 +184,88 @@ def _easyocr_best_rotation(img) -> tuple[str, float, int]:
     else:
         # Default to Devanagari (Hindi, Marathi, etc.)
         regional_langs = ["en", "hi", "mr"]
-        
-    # 3. Regional deep-pass at the known correct angle
+
+    # 3. Regional deep-pass at the known correct angle, MERGED with the English
+    # pass rather than replacing it. The regional model reads the script it
+    # was added for, but reads Latin text worse than the English-only model
+    # and drops low-confidence Latin tokens -- on a scanned PAN card
+    # (2026-09-17, B R Trading Co) the regional pass alone lost the
+    # "GOVT OF INDIA" header and the PAN-number line the English pass had
+    # found, and the card went unclassified.
+    merged = best_kept
     regional_reader = _get_easyocr_reader(regional_langs)
     if regional_reader:
         rotated = img.rotate(best_angle, expand=True) if best_angle else img
         results = regional_reader.readtext(np.array(rotated), detail=1)
-        parts = [txt for (_bbox, txt, conf) in results if conf >= 0.4]
-        best_text = "\n".join(parts)
-        best_score = sum(len(txt) for txt in parts)
-        
-    return best_text, best_score, best_angle
+        regional_kept = [(bbox, txt, conf) for (bbox, txt, conf) in results if conf >= 0.4]
+        merged = _merge_ocr_passes(best_kept, regional_kept)
+
+    lines = [txt for (_b, txt, _c) in _reading_order(merged)]
+    return "\n".join(lines), float(sum(len(x) for x in lines)), best_angle
+
+
+def _rect(bbox) -> tuple[float, float, float, float]:
+    xs = [float(p[0]) for p in bbox]
+    ys = [float(p[1]) for p in bbox]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def _iou(a, b) -> float:
+    ax0, ay0, ax1, ay1 = _rect(a)
+    bx0, by0, bx1, by1 = _rect(b)
+    iw = max(0.0, min(ax1, bx1) - max(ax0, bx0))
+    ih = max(0.0, min(ay1, by1) - max(ay0, by0))
+    inter = iw * ih
+    if inter <= 0:
+        return 0.0
+    union = (ax1 - ax0) * (ay1 - ay0) + (bx1 - bx0) * (by1 - by0) - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _merge_ocr_passes(primary: list, secondary: list) -> list:
+    """Union of two passes' (bbox, text, conf) tokens over the same image.
+    Where both read the same region (IoU >= 0.5) the higher-confidence
+    reading wins; everything else is kept from both."""
+    out = list(primary)
+    for bbox, txt, conf in secondary:
+        clash = None
+        for i, (pb, _pt, pc) in enumerate(out):
+            if _iou(bbox, pb) >= 0.5:
+                clash = (i, pc)
+                break
+        if clash is None:
+            out.append((bbox, txt, conf))
+        elif conf > clash[1]:
+            out[clash[0]] = (bbox, txt, conf)
+    return out
+
+
+def _reading_order(tokens: list) -> list:
+    """Sort tokens top-to-bottom, then left-to-right within a visual line, so
+    text merged from two passes comes out in the order a person reads the
+    page (parsers key on "the line after X"). Tokens whose vertical centres
+    are within 60% of the median token height are treated as one line."""
+    if not tokens:
+        return []
+    rects = [(_rect(b), b, t, c) for (b, t, c) in tokens]
+    heights = sorted(r[0][3] - r[0][1] for r in rects) or [1.0]
+    tol = 0.6 * max(1.0, heights[len(heights) // 2])
+    rects.sort(key=lambda r: ((r[0][1] + r[0][3]) / 2, r[0][0]))
+    lines, current, current_y = [], [], None
+    for r in rects:
+        yc = (r[0][1] + r[0][3]) / 2
+        if current and abs(yc - current_y) > tol:
+            lines.append(current)
+            current, current_y = [], None
+        if current_y is None:
+            current_y = yc
+        current.append(r)
+    if current:
+        lines.append(current)
+    ordered = []
+    for line in lines:
+        ordered.extend(sorted(line, key=lambda r: r[0][0]))
+    return [(b, t, c) for (_r, b, t, c) in ordered]
 
 
 # ---------------------------------------------------------------- Visual cancellation-mark check

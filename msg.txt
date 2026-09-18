@@ -1,61 +1,167 @@
-Microsoft Foundry provider, web search off by default, bounded loop with failure transcripts
+feat: analyst review workbook + finalise flow; fix document reading and address matching on real vendor files
 
-Adds a third reviewer provider for the data-residency path: an open-weight
-model (DeepSeek-V4-Pro, Kimi K3, ...) sold and hosted by Microsoft Foundry
-inside our own Azure subscription, reached through its OpenAI-compatible
-chat-completions endpoint. The model's maker never sees a request, and
-Microsoft does not train on or share prompts/completions; with a regional
-or Data Zone deployment plus the modified abuse-monitoring exemption,
-nothing is stored. .env.example carries the five-step deployment checklist
-those guarantees depend on.
+Two pieces of work, both driven by real vendor folders the analysts brought
+on 17-18 Sep (Sri Laxmi Steel, B R Trading Co): a way for a non-engineer to
+correct a report and rebuild it, and a set of extraction / matching defects
+those folders exposed.
 
-vdd/review/model.py
-- LLM_PROVIDER=foundry with FOUNDRY_ENDPOINT / FOUNDRY_API_KEY /
-  FOUNDRY_DEPLOYMENT, optional FOUNDRY_API_VERSION (Model Inference route),
-  FOUNDRY_MAX_OUTPUT_TOKENS (8192; a reasoning model's thinking counts
-  against it) and FOUNDRY_EXTRA_BODY (JSON pass-through for model-card
-  fields such as thinking controls -- nothing guessed in code).
-- Sends Azure's `api-key` header alongside the bearer token so both the
-  /openai/v1 and Model Inference routes authenticate.
-- A configured Foundry endpoint outranks Gemini/Op
-  LLM_PROVIDER still overrides.
+===========================================================================
+1. Analyst review workbook and finalise
+===========================================================================
 
-vdd/review/graph.py
-- Foundry only: bounded loop. A "Tool budget" section in the user message,
-  _FinishWithReport middleware that withholds every tool except ReviewReport
-  on the last allowed call (FOUNDRY_MAX_MODEL_CALLS, default 8), and a
-  ModelCallLimitMiddleware backstop at +2. create_agent binds every turn
-  with tool_choice="any" when structured output is requested, so calling
-  ReviewReport is the only exit -- a small self-hosted model (QwenTest
-  branch, 2026-09-16) never took it unprompted. Gemini/OpenAI are untouched.
-- All providers: the agent is streamed instead of
-  raises or ends without a ReviewReport logs a per-message transcript table
-  and writes <VENDOR>_review_failure_pass<N>.json
-  field, passed from pipeline.py) instead of discarding the evidence.
+Every run now emits three files: the PDF, the review trace, and
+<VENDOR>_review.xlsx. HTML is no longer written (--html restores it; the
+webapp handles its absence). The workbook is the hand-off to the analyst:
+edited in Excel, sent back whenever, and the final report is rebuilt from
+it. No terminal, no web form, no server-side state.
 
-vdd/review/tools.py
-- web_search (Tavily) is only offered when REVIEW_WEB_SEARCH=1. The model
-  composes the query itself and put a PAN and a premises address into it in
-  real traces (out/MVIKAS_review_trace.json, out/S
-  Tavily is not a KYC data source. Across 22 traces it was used 0.5x per run
-  and every 4/4-recall run got there without it. Azure's Grounding with Bing
-  Search is not a substitute: Microsoft's docs pla
-  compliance boundary (DPA does not apply).
+vdd/review_sheet.py (new)
+- Review sheet: one row per scored parameter -- code, id, name, system
+  value, meaning, score/max, source, evidence -- then two unlocked cells:
+  Analyst value (a dropdown of that parameter's valid buckets from
+  scoring_model.json plus 'unresolved'; a validated number for the two
+  numeric rows) and Analyst note. Live preview score per row, per section
+  and total as formulas (INDEX/MATCH into a Choices sheet for category
+  params; the model's numeric bands translated to nested IFs). Summary
+  block at the top.
+- Entity fields (the REPORT_ENTITY_FIELDS the report reads), Documents
+  (detected type + a correct-type dropdown), Flags (cross-check items,
+  unresolved fields, API errors, extraction warnings, LLM findings),
+  Choices (the points table), Audit, Meta (vendor, run date, scoring-model
+  hash, analyst-name cell). Everything but the analyst cells is locked.
+- Reader, validator and applier. An invalid value (wrong bucket, non-number,
+  a field the report doesn't read, an unknown document type) is reported as
+  a plain list and nothing is generated. Precedence when applying:
+  analyst value > LLM-review correction carried in the sheet > the fresh
+  deterministic value. An override the fresh run now disagrees with is
+  still applied but flagged "may be stale" in the audit and cross-check
+  list. Overrides of ownership / electricity re-derive
+  addr_rental_validation and addr_landlord_declaration through the same
+  resolvers the pipeline uses (an explicit analyst value on those rows
+  wins). Excel date cells come back as dd/mm/yyyy; list fields as
+  ';'-separated.
 
-run_vendor.py: vdd.review logs at INFO so the forced-finish and transcript
-lines are visible. README/.env.example: provider docs, deployment
-checklist, evaluation bar.
+vdd/pipeline.py
+- finalise_vendor(): documents + workbook -> PDF + updated workbook. The
+  deterministic pipeline re-runs (API calls are cached; OCR is the cost);
+  the LLM review does NOT -- it already ran, and re-running it would only
+  re-raise what the analyst just settled. Its corrections travel in the
+  sheet (Source: llm-review) and are re-applied unless overridden.
+  Cross-check items are recomputed from the applied state so a settled
+  judgment call is not re-raised; a scoring-model hash mismatch is warned.
+- compute_vendor_data(doc_type_overrides=...): the Documents sheet's
+  corrections are applied at classification time ('ignore' drops a file).
+- _run_review now returns the post-review entity/resolved, so the workbook
+  shows what the LLM corrected; the sheet writer runs after every report.
+- VendorRunResult.sheet_path.
 
-Tests: 73 (was 63). New tests/test_review_foundry.py covers provider
-precedence, Azure header/extra-body construction,
-tool-happy fake model forced to submit on call 5, a model that ignores the
-forced finish leaving a transcript within 7 calls, and that Gemini/OpenAI
-receive neither the budget section nor the middlew
-test_wrapping_keeps_tool_schemas_identical now enables REVIEW_WEB_SEARCH
-explicitly.
+finalise_report.py (new CLI), run_vendor.py (--html, prints the sheet
+path), webapp (POST /api/finalise: documents + sheet -> report; 422 with
+the problem list on a bad sheet; review_sheet_url and a download button
+on the run result), render.py (generate_report writes HTML only on
+request; PDF is the deliverable).
 
-Verified with a real Gemini run on this branch (Skandan, 1 pass, approved,
-RECALL 4/4, 19,644 in / 6,055 out): the date_of_registration correction
-now renders -- "GST Since 02/01/2024" in the delivered report, where every
-earlier run left N/A. Foundry itself is unexercise
-exists.
+Verified on Sri Laxmi Steel: 31/100 deterministic -> 38/100 after two
+analyst edits (ownership rented, seller type manufacturer); the notes are
+printed as the evidence line in the PDF annex; rental validation and the
+landlord-NOC row re-derived; four audit rows.
+
+Preview formulas are unit-tested for structure and by hand; LibreOffice
+is not available on this machine to recalculate them. Excel computes them
+on open.
+
+===========================================================================
+2. Document reading and address matching (real-vendor regressions)
+===========================================================================
+
+classify.py
+- Electricity bills: "electrity bill sri laxmi steel.png" matched no
+  filename pattern (misspelling) and no content signature (a TSSPDCL bill
+  never says "electricity"). Patterns now accept `elec\w*bill`,
+  power/current/EB bill and state DISCOM names; signatures add the DISCOM
+  label pairs (Consumer Name + Service Number, Unique Service Number, ERO,
+  Current Month Bill) and lone kWh / connected load.
+- A bare "pan" filename token is a PAN card (BRT_pan.pdf, B.P.RAY_PAN.pdf);
+  msme/udyam match across underscores (\b never matched
+  "..._Udyam_Registration_..."); PAN content signatures tolerate OCR
+  ("PErmanent Account Numiber", "GOYT. Of INDIA").
+
+ocr.py
+- The regional EasyOCR pass REPLACED the English pass and dropped the
+  header and PAN line of a scanned card. The two passes are now merged by
+  bounding-box overlap (higher confidence wins) and sorted into reading
+  order. Both B R Trading PAN cards became readable.
+
+parsers.py
+- parse_pan_card: the bilingual card's Devanagari title and the
+  "नाम / Name" caption (OCR: "I Name") were taken as the holder's name, so
+  ident_pan_name_match had no Latin tokens to compare while the real name
+  sat one line down. Non-Latin and caption lines are skipped; header stems
+  are OCR-tolerant; the e-PAN path uses the same filter.
+- parse_electricity_bill: DISCOM labels terminate the address (it used to
+  swallow the rest of the bill); the CESC layout's unlabelled "M/S ..."
+  consumer block is parsed (name line through the PIN line).
+- parse_msme_certificate: extracts the Udyam address block and PIN.
+
+pipeline.py
+- _route_pan_cards: a card carrying the GSTIN-derived PAN (cleanly, or as
+  a recognisable OCR garble -- edit distance over the 10-char token) is
+  the entity's; a different clean PAN is an owner's/partner's -> pan_owner.
+  Two cards both filed as pan_entity used to overwrite each other's name.
+- CIN never taken from an electricity bill (the CESC bill printed CESC
+  Limited's CIN and Probe42 was queried with it) and never kept for a
+  non-company constitution.
+- extract_text memoised per file within a run; entity['udyam_address'].
+
+resolvers.py
+- resolve_addr_ownership_type cited the bill as proof the connection was
+  "in the entity's own name" without checking the name -- on Sri Laxmi
+  Steel the consumer was another firm (the landlord's meter), evidence
+  AGAINST ownership. The consumer is now compared against legal/trade/PAN
+  names and partners; a mismatch with no rental agreement resolves
+  unresolved with a GAP note naming the third party.
+- Address matching: a bare 1-2 digit number is not a premises identifier
+  ("Road Number 2" vs "Phase 2" both reduced to '2' and scored a match);
+  plot/survey/door numbers are extracted as the premises identity and two
+  addresses naming different plots CONFLICT -- never a full match, capped
+  at minor_discrepancy with the plots stated in the note. Label words
+  ("name", "section") are stop words; Devanagari digits normalise;
+  6+-letter localities match by containment (OCR "AJJEEDIMETLA").
+- udyam_vs_gst_address_note: the Udyam registration's address is compared
+  with the GST-registered one and a WARNING is attached to addr_msme when
+  they name different premises (surfaces as a cross-check item, in the
+  Flags sheet and to the reviewer). No scored parameter compares the two
+  statutory registrations, so this was invisible before.
+- _name_match: character-ratio fallback (>= 0.85, word order kept) so an
+  OCR-garbled "B R TRAIING ?O" still matches "B R TRADING CO".
+- resolve_addr_rental_validation extracted from resolve_all so it can be
+  re-derived after an override.
+
+Measured
+- Sri Laxmi Steel: 34/100 (wrong -- ownership inferred from the landlord's
+  meter, bill vs GST "match" on the token '2') -> 30/100 honest: PAN name
+  Match (+2), bill vs GST "minor discrepancy: plot 382 vs plots
+  305/306/308/384/385, same locality", Udyam vs GST WARNING (plots
+  301/558/562/563 vs 305/306/308/384/385), ownership GAP naming Devi
+  Engineering Works.
+- B R Trading Co: 41 -> 45: both PAN cards read (POI-04 Match), the CESC
+  bill parsed and matched on 135/11/A/2 with the PIN-off-by-one treated as
+  a utility-record error, Udyam and GST agree, the bogus Probe42 call with
+  the utility's CIN is gone.
+
+Tests: 129 (was 73) -- tests/test_review_sheet.py (workbook round trip:
+write, edit as in Excel, read, validate, apply, re-score, cascade, stale
+flag, audit carry-forward), tests/test_classify.py,
+tests/test_document_reading_regressions.py (PAN card layouts, OCR merge,
+DISCOM/CESC bills, plot conflicts, Udyam vs GST), three ownership branches
+in test_resolver_branches.py.
+
+Known, deliberately not changed: a lone survey number on one document
+against a lone plot number on the other reads as a conflict (the note
+says what was compared; the analyst can override it from the sheet); the
+GST certificate's Annexure A (additional places of business) is not
+extracted; the trade-name parser strips "M/S " but not "M/S."; the
+token-overlap name match still treats two partners sharing a surname as
+the same name.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>

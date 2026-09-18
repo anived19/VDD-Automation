@@ -40,6 +40,30 @@ def test_ownership_owned_via_sale_deed_is_confirmed_not_inferred():
     assert r.value == "owned" and "NO SALE DEED" not in r.note
 
 
+def test_ownership_inferred_when_bill_is_in_the_entitys_own_name():
+    entity = {"legal_name": "VEER SHETTY SHIVALLA", "trade_name": "SRI LAXMI STEEL",
+              "electricity_bill_consumer_name": "M/S SRI LAXMI STEEL"}
+    r = resolve_addr_ownership_type(False, True, entity=entity)
+    assert r.value == "owned" and "NO SALE DEED" in r.note
+    assert "in the entity's own name (M/S SRI LAXMI STEEL)" in r.note
+
+
+def test_ownership_not_inferred_when_bill_is_in_a_third_partys_name():
+    # 2026-09-17, Sri Laxmi Steel: the bill's consumer was another firm at the
+    # same industrial estate -- the landlord's meter -- and the old code cited it
+    # as proof the connection was "in the entity's own name".
+    entity = {"legal_name": "VEER SHETTY SHIVALLA", "trade_name": "SRI LAXMI STEEL",
+              "electricity_bill_consumer_name": "M/S DEVI ENGINEERING WORKS"}
+    r = resolve_addr_ownership_type(False, True, entity=entity)
+    assert r.unresolved
+    assert "GAP:" in r.note and "DEVI ENGINEERING WORKS" in r.note and "rental agreement" in r.note
+
+
+def test_ownership_inferred_without_a_consumer_name_carries_no_name_claim():
+    r = resolve_addr_ownership_type(False, True, entity={"legal_name": "X"})
+    assert r.value == "owned" and "own name" not in r.note
+
+
 # ---------------------------------------------------------------- multiple registrations
 def _by_pan(rows):
     return {"results": rows}

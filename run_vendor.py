@@ -35,6 +35,7 @@ def main():
                      help="Skip the LLM review loop regardless of GEMINI_API_KEY/OPENAI_API_KEY -- deterministic-only report")
     ap.add_argument("--max-review-iterations", type=int, default=None,
                      help="Safety cap on review passes (default: vdd.review.graph.DEFAULT_MAX_ITERATIONS)")
+    ap.add_argument("--html", action="store_true", help="Also write the report as HTML (the PDF is the deliverable)")
     args = ap.parse_args()
 
     client = None
@@ -49,7 +50,7 @@ def main():
 
     result = run_vendor(args.docs, args.out, client=client, scoring_model_path=args.scoring_model,
                          ocr_cache_dir=args.cache_dir, review=not args.no_review,
-                         max_review_iterations=args.max_review_iterations)
+                         max_review_iterations=args.max_review_iterations, write_html=args.html)
 
     print(f"\n=== {result.vendor_name} ===")
     print(f"Score: {result.score}/100 (No-Consent categories only -- "
@@ -58,6 +59,8 @@ def main():
         print(f"HTML:  {result.html_path}")
     if result.pdf_path:
         print(f"PDF:   {result.pdf_path}")
+    if result.sheet_path:
+        print(f"Review sheet: {result.sheet_path}  (edit in Excel, then: python finalise_report.py --docs ... --sheet ...)")
 
     if result.reviewed:
         status = "approved by the reviewer" if result.approved else "safety cap reached, not approved"
