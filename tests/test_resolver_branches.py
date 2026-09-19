@@ -147,18 +147,24 @@ def test_bank_flags_uncancelled_cheque():
 
 
 # ---------------------------------------------------------------- bank verification: live penny drop
-def test_bank_live_penny_drop_match_takes_priority_over_gst_portal():
-    """A live penny-drop result is the primary signal -- even a GST-portal
-    'NotValidated' flag (which alone would leave this unresolved, see
-    test_bank_unresolved_not_negative_when_portal_says_notvalidated) must not
-    override a successful, name-matching live penny drop."""
-    e = dict(_BASE_BANK, legal_name="Dinesh Polymers",
-             gst_portal_bank_verified=False, gst_portal_account_status="NotValidated")
+def test_bank_live_penny_drop_is_gst_match_only_when_the_portal_registers_that_account():
+    """"GST match" = the penny-dropped account is the one registered on the GST
+    portal. A holder-name match with the legal name alone is not it (B R
+    Trading Co scored 5/5 with no portal screenshot, 2026-09-19)."""
     api = ApiBundle(bank_verification={"code": "0", "message": "Success",
                                         "bank_account_data": {"name": "DINESH POLYMERS", "bank_name": "Central Bank of India"}})
+    # no portal screenshot on file -> unavailable (2), not match (5)
+    r = resolve_com_bank_verification(dict(_BASE_BANK, legal_name="Dinesh Polymers"), api)
+    assert r.value == "penny_success_gst_unavailable" and "no GST portal" in r.note
+    # portal registers the same account -> match, even if GSTN shows it NotValidated
+    e = dict(_BASE_BANK, legal_name="Dinesh Polymers", gst_portal_bank_verified=False,
+             gst_portal_account_status="NotValidated", gst_portal_account_number="1351141739")
     r = resolve_com_bank_verification(e, api)
-    assert r.value == "penny_success_gst_match" and not r.unresolved
-    assert "api:ongrid.bank-verification.verify" in r.source
+    assert r.value == "penny_success_gst_match" and "api:ongrid.bank-verification.verify" in r.source
+    # portal registers a different account -> mismatch
+    e["gst_portal_account_number"] = "9999999999"
+    r = resolve_com_bank_verification(e, api)
+    assert r.value == "penny_success_gst_mismatch" and "different account" in r.note
 
 
 def test_bank_live_penny_drop_name_mismatch():
@@ -197,12 +203,14 @@ def test_bank_falls_back_to_gst_portal_when_no_live_result():
 _GST_ADDR = "G100, MIDC, JALGAON, Jalgaon, Maharashtra, 425003"
 
 
-def test_pin_mismatch_is_a_match_when_plot_locality_and_name_all_agree():
+def test_pin_mismatch_is_at_most_a_minor_discrepancy_even_when_all_else_agrees():
+    """Analyst decision 2026-09-19: a differing PIN is never a full match, even
+    with plot, locality and consumer name agreeing (it was 'match' before)."""
     r = resolve_addr_electricity_bill(_GST_ADDR, "PL.NO G-100, M.I.D.C. JALGAON", "422305",
                                        bill_village="JALGAON",
                                        bill_consumer_name="M/S. DINESH POLYMERS",
                                        entity_name="DINESH POLYMERS")
-    assert r.value == "match" and "422305" in r.note
+    assert r.value == "minor_discrepancy" and "422305" in r.note and "never a full match" in r.note
 
 
 def test_pin_mismatch_stays_minor_discrepancy_without_a_name_match():
@@ -274,3 +282,46 @@ def test_premises_proof_for_a_different_address_scores_zero_not_rented():
     # anything short of a definite mismatch is unchanged
     assert resolve_addr_ownership_type(True, True, entity={}, electricity=Resolved.ok("minor_discrepancy", "x")).value == "rented"
     assert resolve_addr_ownership_type(False, True, entity={}, electricity=Resolved.missing("could not compare")).value == "owned"
+
+
+# ---------------------------------------------------------------- seller type from the strongest source (19-Sep)
+def test_seller_type_prefers_gst_registry_and_nic_over_udyam_major_activity():
+    from vdd.resolve.resolvers import resolve_ident_seller_type
+    # B R Trading Co: GST says Retail, NIC 46620 wholesale, Udyam form says Manufacturing -> trader, with the conflict stated
+    r = resolve_ident_seller_type(gst_activity="Retail Business", nic_code="46620",
+                                  nic_description="Wholesale of metals and metal ores", major_activity="Manufacturing")
+    assert r.value == "trader" and "CONFLICT" in r.note and "Manufacturing" in r.note
+    # Sri Laxmi Steel: GST wholesale/retail, NIC 25119 manufacturing, no major activity parsed -> trader (registry first)
+    r = resolve_ident_seller_type(gst_activity="Wholesale Business, Retail Business", nic_code="25119",
+                                  nic_description="Manufacture of other structural metal products")
+    assert r.value == "trader" and "25119" in r.note
+    # a manufacturer registered as one
+    r = resolve_ident_seller_type(gst_activity="Factory / Manufacturing, Wholesale Business", nic_code="22209")
+    assert r.value == "manufacturer" and "CONFLICT" not in r.note
+    # only the Udyam form available -> still used
+    assert resolve_ident_seller_type(major_activity="Trading").value == "trader"
+    assert resolve_ident_seller_type(nic_code="38300").value == "processor"
+    assert resolve_ident_seller_type().unresolved
+
+
+# ---------------------------------------------------------------- a watchlist hit is scored (19-Sep)
+def test_zigram_watchlist_hit_outside_the_five_slots_scores_aml01_zero():
+    from vdd.resolve.resolvers import resolve_aml
+    from vdd.score.engine import ScoringEngine
+    fake = {"legal_sanctions": [], "other": ["B R TRADING CO: matched 'GST - Non Genuine Dealers' (category: Indian Watchlists), "
+                                             "fuzzy_score=100%, status=Red -- 19 matching rows, source=https://x"],
+            "_comprehensive": True}
+    import vdd.aml.zigram_screening as Z
+    monkey = Z.summarize_screen
+    Z.summarize_screen = lambda resp, label: dict(fake)
+    try:
+        out = resolve_aml(ApiBundle(zigram={"x": 1}), "B R TRADING CO", [])
+    finally:
+        Z.summarize_screen = monkey
+    r = out["legal_sanctions"]
+    assert r.value == "adverse_watchlist" and "WATCHLIST HIT" in r.note and "Non Genuine" in r.note
+    assert out["legal_pep"].value == "no_pep"      # the other four are unaffected
+    engine = ScoringEngine("config/scoring_model.json")
+    scored = {p.parameter_id: p for c in engine.score_no_consent(out).categories for p in c.params}
+    assert scored["legal_sanctions"].assigned_score == 0 and not scored["legal_sanctions"].unresolved
+    assert "watchlist" in scored["legal_sanctions"].matched_condition.lower()

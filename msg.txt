@@ -1,4 +1,4 @@
-fix: PDF page/footer/header, invisible evidence text, LLM note-only corrections, TANGEDCO bill, parser gaps, Zigram dedupe; feat: address_mismatch bucket, readable analyst workbook
+fix: PDF page/footer/header, LLM note-only corrections, TANGEDCO bill, parser gaps, Zigram dedupe, seller type, bank 'GST match', PIN mismatch; feat: address_mismatch + adverse_watchlist buckets, scored watchlist hits, option-only annex, readable analyst workbook
 
 PDF (vdd/report/render.py, assets/template_head.html)
   The report is one tall page sized to its content, but the height search
@@ -127,10 +127,11 @@ Scans with a token text layer (vdd/extract/ocr.py, pipeline.py)
 Evidence sub-lines were invisible in every PDF (vdd/report/build_context.py)
   The annex's evidence/reason line under each row's verdict was styled
   rgba(255,255,255,.42) -- white at 42%, a dark-panel style -- on the
-  white annex rows, so it has been unreadable in every report since the
-  first commit; the rows were merely taller. Noticed on B R Trading Co,
-  where AML-01's sub-line was 7,800 characters of blank. Now #6B7280 like
-  the other muted text: the audit trail the annex exists for is readable.
+  white annex rows, so it had been unreadable in every report since the
+  first commit; the rows were merely taller (B R Trading Co's AML-01
+  sub-line was 7,800 characters of blank). Superseded the same day by
+  item 3 below: the analysts want the option only, so the sub-line is
+  removed rather than recoloured.
 
 Zigram findings deduplicated (vdd/aml/zigram_screening.py)
   summarize_screen returned one line per matched row; a watchlist that is
@@ -143,7 +144,46 @@ Zigram findings deduplicated (vdd/aml/zigram_screening.py)
   B R Trading Co's AML section: 7,840 characters -> 1,328; the page 4,577
   -> 3,382 px.
 
-Tests: 180 -- tests/test_report_location.py (new), four note-only cases in
+Six report corrections from the analysts' read of B R Trading Co against
+their own reference report (19-Sep)
+  1. Seller type (resolvers.py): classified from the GST registry's nature
+     of business first, then the Udyam NIC code (division 10-33
+     manufacturing, 38 recovery/processing, 45-47 trade), then the Udyam
+     form's self-declared major activity, then free text; disagreement is
+     stated in the note. B R Trading Co ("Retail Business" on GST, NIC 46620
+     wholesale, Udyam form "Manufacturing") is a Trader (0/4), not a
+     Manufacturer (4/4). An unresolved seller type shows "Unclassified" in
+     the header instead of defaulting to "Trader".
+  2. Electricity bill (resolvers.py): a differing PIN is never a full
+     match. With plot, locality and consumer name all agreeing it is a
+     minor discrepancy (1/2) noted as a likely utility-record error; it used
+     to be "match".
+  3. Annex (build_context.py): each row shows the selected option only; the
+     reasoning stays in the workbook's Evidence column and in the reviewer's
+     "Resolved parameter values" section. The evidence style is gone.
+  4. Bank verification (resolvers.py): "GST match" means the penny-dropped
+     account is the one registered on the GST portal (the bank-details
+     screenshot), as the model and the analysts' reports read it -- not
+     that the holder name matches the legal name. Portal registers the same
+     account -> match (5), even if GSTN shows it NotValidated; a different
+     account -> mismatch (1); no portal screenshot on file -> unavailable
+     (2). A holder-name mismatch stays a CRITICAL mismatch. B R Trading Co:
+     5/5 -> 2/5.
+  5. AML (config/scoring_model.json, resolvers.py, build_context.py): a
+     Zigram hit on a list outside the five slots (state GST non-genuine
+     dealer lists, ESIC defaulters) is scored -- AML-01 -> "adverse_watchlist"
+     (0, an addition to the model) with the hit in the note -- and named in
+     Findings & Observations; the header chip follows the scored rows only,
+     so it can no longer contradict the score. The analyst restores
+     not_listed from the workbook when the match is a namesake.
+  6. Entity Details (build_context.py): the seven rows of the reference
+     report -- Formation Date (Udyam) and Partners / Signatories removed
+     ("partners" leaves REPORT_ENTITY_FIELDS); the address is printed as an
+     address ("135/11/A/2, GIRISH GHOSH ROAD, BELURMATH, Howrah, West
+     Bengal, 711202"), not as the certificate's labelled fields.
+  B R Trading Co: 45 -> 36 (seller type -4, bank -3, bill -1, AML -1).
+
+Tests: 183 -- tests/test_report_location.py (new), four note-only cases in
 tests/test_review_corrections.py, a TANGEDCO bill, cheque holder, initials, COI and
 GST-date cases in tests/test_document_reading_regressions.py, scan detection
 and the OCR retry in tests/test_format_and_cache.py, the address_mismatch
@@ -153,9 +193,12 @@ panes, hidden software columns, row height follows note length, analyst
 name read from the Review sheet); the summary-formula test now locates
 cells by column constant rather than letter.
 
-All three real folders regenerated after everything above: Sri Laxmi Steel
-30, B R Trading Co 45, Skandan Plastrix 43 (deterministic); one page each,
-footer on it, evidence lines readable.
+All three real folders regenerated after everything above (deterministic):
+Sri Laxmi Steel 30 (seller type now Trader 0/4 by the GST registry, same
+points as the old unresolved), B R Trading Co 36, Skandan Plastrix 39
+(bank 5 -> 2: no portal screenshot; AML-01 1 -> 0: the ESIC defaulters hit;
+seller type stays Manufacturer -- GST registry says Factory / Manufacturing).
+One page each, footer on it.
 
 Files: config/scoring_model.json, requirements.txt, vdd/aml/zigram_screening.py,
 vdd/extract/classify.py, vdd/extract/consistency.py, vdd/extract/ocr.py,
@@ -166,3 +209,4 @@ tests/test_report_location.py (new), tests/test_document_reading_regressions.py,
 tests/test_format_and_cache.py, tests/test_resolver_branches.py,
 tests/test_review_corrections.py, tests/test_review_sheet.py,
 tests/test_zigram_screening.py.
+

@@ -897,9 +897,12 @@ def resolve_addr_electricity_bill(gst_address: Optional[str], bill_address: Opti
         # address. Requiring all three keeps this from firing on a genuinely
         # different premises (where the plot number would not agree).
         if premises_match and len(place_hits) >= 2 and name_match is True:
-            return Resolved.ok("match", src, note="; ".join(evidence) + f". {pin_note} "
-                                "-- treated as a utility-record data error, not an address discrepancy, "
-                                "because plot number, locality/city and consumer name all agree.")
+            # Everything but the PIN agrees -- almost certainly the utility's
+            # record -- but a differing PIN is never a full match (analyst
+            # decision 2026-09-19; it was scored "match" before).
+            return Resolved.ok("minor_discrepancy", src, note="; ".join(evidence) + f". {pin_note} "
+                                "-- plot number, locality/city and consumer name all agree, so this is most "
+                                "likely a utility-record error, but a PIN difference is never a full match.")
         if premises_match or place_hits:
             return Resolved.ok("minor_discrepancy", src,
                                 note="; ".join(evidence or ["partial address overlap only"]) + f". {pin_note}")
@@ -999,11 +1002,54 @@ def resolve_ident_pan_active(api: ApiBundle, gstin_active: Optional[str] = None)
     return Resolved.missing("No PAN status from Digitap, and GSTIN status wasn't 'active' to infer from")
 
 
-def resolve_ident_seller_type(nature_of_business: str, major_activity: str) -> Resolved:
-    guess = _classify_seller_type(nature_of_business or "", major_activity or "")
-    if guess is None:
-        return Resolved.missing("Nature-of-business text didn't match any seller-type keyword")
-    return Resolved.ok(guess, "keyword match on nature-of-business / MSME major activity")
+def _seller_type_from_nic(code: Optional[str]) -> Optional[str]:
+    """NIC 2008 division -> seller type: 10-33 manufacturing, 38 waste
+    collection / materials recovery, 45-47 trade (wholesale, retail)."""
+    m = re.match(r'\s*(\d{2})', str(code or ""))
+    if not m:
+        return None
+    div = int(m.group(1))
+    if 10 <= div <= 33:
+        return "manufacturer"
+    if div == 38:
+        return "processor"
+    if 45 <= div <= 47:
+        return "trader"
+    return None
+
+
+def resolve_ident_seller_type(gst_activity: Optional[str] = None, nic_code: Optional[str] = None,
+                              nic_description: Optional[str] = None, major_activity: Optional[str] = None,
+                              nature_of_business: Optional[str] = None) -> Resolved:
+    """Manufacturer / processor / trader from the sources in order of how hard
+    they are to get wrong: the GST registry's nature of business (what the
+    taxpayer registered for), the Udyam NIC code (a classified activity),
+    then the Udyam certificate's self-declared MAJOR ACTIVITY, then any
+    free-text nature of business. The old resolver read only the last two
+    and called B R Trading Co -- "Retail Business" on GST, NIC 46620
+    "Wholesale of metals and metal ores" -- a Manufacturer because its Udyam
+    form says "Manufacturing" (2026-09-19). Disagreement is stated."""
+    verdicts = []   # (source label, what it said, verdict)
+    if gst_activity:
+        verdicts.append(("GST registry nature of business", gst_activity, _classify_seller_type(gst_activity)))
+    if nic_code or nic_description:
+        v = _seller_type_from_nic(nic_code) or _classify_seller_type(nic_description or "")
+        verdicts.append(("Udyam NIC code", f"{nic_code or ''} {nic_description or ''}".strip(), v))
+    if major_activity:
+        verdicts.append(("Udyam major activity (self-declared)", major_activity, _classify_seller_type(major_activity)))
+    if nature_of_business:
+        verdicts.append(("nature of business text", nature_of_business, _classify_seller_type(nature_of_business)))
+    decided = [(lab, said, v) for lab, said, v in verdicts if v]
+    if not decided:
+        return Resolved.missing("No source classified the seller type (GST registry activity, Udyam NIC code, "
+                                "Udyam major activity, nature-of-business text all absent or unrecognised)")
+    label, said, guess = decided[0]
+    note = f"{guess} per {label} ('{said}')"
+    others = [(lab, s, v) for lab, s, v in decided[1:] if v != guess]
+    if others:
+        note += " -- CONFLICT: " + "; ".join(f"{lab} says '{s}' ({v})" for lab, s, v in others) \
+                + f"; the {label} is taken as the stronger source"
+    return Resolved.ok(guess, f"{label}" + (" + others" if len(decided) > 1 else ""), note=note)
 
 
 def resolve_ident_constitution(gst_constitution: str) -> Resolved:
@@ -1239,12 +1285,23 @@ def resolve_aml(api: ApiBundle, entity_name: str = None, partner_names: List[str
 
     other_hits = _hits("other")
     if other_hits:
-        extra_note = " | ADDITIONAL ZIGRAM FINDING(S) outside this pipeline's 5 scored AML parameters " \
-                     "(not counted in any score, surfaced for analyst review): " + "; ".join(other_hits)
-        out["legal_sanctions"] = Resolved(
-            value=out["legal_sanctions"].value, source=out["legal_sanctions"].source,
-            note=(out["legal_sanctions"].note or "") + extra_note,
-            unresolved=out["legal_sanctions"].unresolved)
+        # A hit on a list that fits none of the five slots (an ESIC defaulters
+        # list, a state GST non-genuine-dealer list) used to ride along as a
+        # note on AML-01 without touching any score. Analyst decision
+        # 2026-09-19: a hit is a hit -- it is scored (AML-01 -> 0, bucket
+        # "adverse_watchlist", an addition to the model) and appears in the
+        # findings. The analyst can restore not_listed from the workbook when
+        # the match is a namesake, with the reason on record.
+        current = out["legal_sanctions"]
+        if current.unresolved or current.value != "listed":
+            out["legal_sanctions"] = Resolved.ok(
+                "adverse_watchlist", "zigram.screening (watchlist hit outside the sanctions lists)",
+                note="WATCHLIST HIT (scored 0 on AML-01 -- confirm or dismiss): " + "; ".join(other_hits)
+                     + ((" | Sanctions lists themselves: " + current.note) if current.note and not current.unresolved else ""))
+        else:
+            out["legal_sanctions"] = Resolved(value=current.value, source=current.source,
+                                              note=(current.note or "") + " | ALSO: " + "; ".join(other_hits),
+                                              unresolved=False)
 
     return out
 
@@ -1325,18 +1382,38 @@ def resolve_com_bank_verification(entity: dict, api: Optional["ApiBundle"] = Non
             resp_bank = (data or {}).get("bank_name")
             ev.append(f"Live penny drop via Ongrid bank-verification succeeded -- account holder name "
                       f"returned: '{holder_name}'" + (f" at {resp_bank}" if resp_bank else ""))
-            if match is True:
-                return Resolved.ok(
-                    "penny_success_gst_match", "api:ongrid.bank-verification.verify (live penny drop)",
-                    note="; ".join(ev) + f"; matches the GST-registered legal name '{legal_name}'.")
             if match is False:
                 ev.append(f"CRITICAL: the returned account-holder name does not match the GST-registered "
                           f"legal name '{legal_name}'")
                 return Resolved.ok("penny_success_gst_mismatch",
                                     "api:ongrid.bank-verification.verify (live penny drop)", note="; ".join(ev))
-            ev.append("no GST-registered legal name on file to compare the penny-drop account-holder name against")
-            return Resolved.ok("penny_success_gst_unavailable",
-                                "api:ongrid.bank-verification.verify (live penny drop)", note="; ".join(ev))
+            if match is True:
+                ev.append(f"holder name matches the GST-registered legal name '{legal_name}'")
+            else:
+                ev.append("no GST-registered legal name on file to compare the holder name against")
+            # "GST match" in the scoring model means the penny-dropped account
+            # IS the account registered on the GST portal (the bank-details
+            # screenshot) -- not that the holder name matches the legal name,
+            # which is how this used to be read (B R Trading Co scored 5/5
+            # with no portal screenshot on file, 2026-09-19). Without the
+            # screenshot the analysts' own reports say "GST unavailable".
+            src = "api:ongrid.bank-verification.verify (live penny drop)"
+            dropped = str(entity.get("account_number") or entity.get("cheque_account_number") or "").strip()
+            portal_acct = str(entity.get("gst_portal_account_number") or "").strip()
+            portal_on_file = entity.get("gst_portal_bank_verified") is not None or bool(portal_acct)
+            if portal_on_file and portal_acct and dropped and portal_acct != dropped:
+                ev.append(f"CRITICAL: the GST portal registers a different account ({portal_acct}) from the one "
+                          f"penny-dropped ({dropped})")
+                return Resolved.ok("penny_success_gst_mismatch", src + " + doc:gst_portal", note="; ".join(ev))
+            if portal_on_file and portal_acct and dropped and portal_acct == dropped:
+                ev.append(f"the GST portal registers this same account ({portal_acct})"
+                          + (" and shows it Validated" if entity.get("gst_portal_bank_verified") else
+                             " (portal validation status: " + str(entity.get("gst_portal_account_status") or "not validated") + ")"))
+                return Resolved.ok("penny_success_gst_match", src + " + doc:gst_portal", note="; ".join(ev))
+            ev.append("no GST portal bank-details screenshot on file to confirm this is the GST-registered account"
+                      if not portal_on_file else
+                      "the GST portal screenshot on file does not show a readable account number to compare")
+            return Resolved.ok("penny_success_gst_unavailable", src, note="; ".join(ev))
         # `bank_account_data` missing/empty on a call that completed without
         # raising is a genuine negative penny-drop result, not an infra
         # failure (those are caught in fetch_api_data and leave this None).
@@ -1418,8 +1495,10 @@ def resolve_all(entity: dict, docs, api: ApiBundle) -> dict:
         "addr_landlord_declaration": resolve_addr_landlord_declaration(
             ownership_resolved, docs.has("landlord_declaration")),
         "ident_pan_active": resolve_ident_pan_active(api, gstin_active_resolved.value),
-        "ident_seller_type": resolve_ident_seller_type(entity.get("nature_of_business", ""),
-                                                        entity.get("major_activity", "")),
+        "ident_seller_type": resolve_ident_seller_type(
+            gst_activity=entity.get("gst_nature_of_business_activity"), nic_code=entity.get("nic_5_code"),
+            nic_description=entity.get("nic_5_description"), major_activity=entity.get("major_activity"),
+            nature_of_business=entity.get("nature_of_business")),
         "ident_constitution": resolve_ident_constitution(entity.get("constitution", "")),
         "ident_pan_name_match": resolve_ident_pan_name_match(entity.get("pan_entity_name"), entity.get("legal_name")),
     }

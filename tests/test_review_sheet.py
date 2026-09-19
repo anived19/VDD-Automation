@@ -151,7 +151,7 @@ def test_analyst_edits_change_the_score_and_are_audited(tmp_path):
                  "com_gst_delay_days": (25, "Portal shows 25-day delay on GSTR-3B for June"),
                  "ident_pan_name_match": ("unresolved", "PAN card illegible")},
           entity_values={"date_of_registration": ("02/01/2024", "from the GST certificate"),
-                         "partners": ("A PERSON; C PERSON", "B left the firm")},
+                         "declared_hsn": ("7204 - Ferrous waste; 7215 - Steel bars", "second HSN added on the portal")},
           doc_values={"Screenshot 1.png": "client_photo"}, analyst="R. Analyst")
     sheet = read_review_workbook(path)
     assert sheet.analyst_name == "R. Analyst"
@@ -164,7 +164,7 @@ def test_analyst_edits_change_the_score_and_are_audited(tmp_path):
     assert applied.resolved["com_gst_delay_days"].value == 25.0
     assert applied.resolved["ident_pan_name_match"].unresolved
     assert applied.entity["date_of_registration"] == "02/01/2024"
-    assert applied.entity["partners"] == ["A PERSON", "C PERSON"]
+    assert applied.entity["declared_hsn"] == [("7204", "Ferrous waste"), ("7215", "Steel bars")]
     assert sheet.doc_overrides == {"Screenshot 1.png": "client_photo"}
 
     after = engine.score_no_consent(applied.resolved).total
@@ -181,7 +181,7 @@ def test_analyst_edits_change_the_score_and_are_audited(tmp_path):
     assert after == before + expected_delta
     assert applied.resolved["addr_rental_validation"].value == "rented_matching"
     kinds = [(a["kind"], a["id"]) for a in applied.audit_rows]
-    assert ("parameter", "addr_ownership_type") in kinds and ("field", "partners") in kinds \
+    assert ("parameter", "addr_ownership_type") in kinds and ("field", "declared_hsn") in kinds \
         and ("document", "Screenshot 1.png") in kinds
     assert all(a["who"] == "R. Analyst" and a["when"] == "2026-09-18 10:00" for a in applied.audit_rows)
 

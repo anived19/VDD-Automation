@@ -261,13 +261,13 @@ def test_adjacent_plot_in_same_estate_is_minor_discrepancy_for_the_right_reason(
     assert r.value == "minor_discrepancy" and "jeedimetla" in r.note and "(name)" not in r.note
 
 
-def test_same_premises_with_utility_pin_off_by_one_is_a_match():
+def test_same_premises_with_utility_pin_off_by_one_is_a_minor_discrepancy():
     gst = ("Building No./Flat No.: 135/11/A/2 Road/Street: GIRISH GHOSH ROAD City/Town/Village: BELURMATH "
            "District: Howrah State: West Bengal PIN Code: 711202")
     bill = parse_electricity_bill(_CESC_BILL)
     r = resolve_addr_electricity_bill(gst, bill["address"], bill.get("pincode"),
                                       bill_consumer_name=bill["consumer_name"], entity_name="EXAMPLE TRADING CO")
-    assert r.value == "match" and "utility-record data error" in r.note
+    assert r.value == "minor_discrepancy" and "utility-record error" in r.note
 
 
 # ---------------------------------------------------------------- three addresses, one vendor (2026-09-18)

@@ -35,3 +35,12 @@ def test_unlabelled_address_still_uses_the_comma_heuristic():
 def test_the_label_word_is_never_the_city():
     for addr in (GST_LAXMI, GST_BRT, UDYAM_LAXMI):
         assert not location(addr).startswith(("Town", "Village", "City"))
+
+
+def test_entity_details_address_drops_the_certificate_labels():
+    from vdd.report.build_context import _display_address
+    assert _display_address(GST_BRT) == "135/11/A/2, GIRISH GHOSH ROAD, BELURMATH, Howrah, West Bengal, 711202"
+    assert _display_address(GST_LAXMI).startswith("survey no 305 306 308, plot no 384 385, s v co op industrial estate, Road Number 2, ida jeedimetla, Hyderabad")
+    assert _display_address(GST_LAXMI).endswith("Telangana, 500055")
+    assert _display_address("Plot 5, MIDC Bhosari, Pune - 411026, Maharashtra") == "Plot 5, MIDC Bhosari, Pune - 411026, Maharashtra"
+    assert _display_address(None) == ""

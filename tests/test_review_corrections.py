@@ -63,11 +63,11 @@ def test_correction_with_neither_id_nor_field_is_escalated(monkeypatch):
 
 
 def test_entity_fields_section_lists_every_field_with_missing_ones_visible():
-    txt = _format_entity_fields({"gstin": "33AAAAA0000A1Z5", "partners": ["A", "B"]})
+    txt = _format_entity_fields({"gstin": "33AAAAA0000A1Z5", "declared_hsn": [("7204", "a"), ("7215", "b")]})
     for k in REPORT_ENTITY_FIELDS:
         assert f"- {k}: " in txt
     assert "- gstin: '33AAAAA0000A1Z5'" in txt
-    assert "- partners: <list of 2>" in txt
+    assert "- declared_hsn: <list of 2>" in txt
     assert "- date_of_registration: None  (report shows N/A / Not Available)" in txt
 
 
