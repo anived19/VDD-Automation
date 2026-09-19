@@ -38,6 +38,7 @@ EXPECTED_FIELDS: dict[str, tuple[str, ...]] = {
     "pan_entity": ("pan", "name"),
     "pan_owner": ("pan", "name"),
     "kyc_form": ("gstin", "pan"),
+    "certificate_of_incorporation": ("name", "cin", "pan", "date_of_incorporation"),
     "electricity_bill": ("consumer_name", "address"),
     "factory_license": ("premises_address",),
     "pcb_certificate": ("premises_address",),
@@ -89,6 +90,7 @@ def assess_reads(reads: list[DocumentRead]) -> None:
 def _norm_name(s: str) -> set:
     s = re.sub(r'^\s*m\s*/?\s*s\.?\s+', '', (s or "").lower())
     s = re.sub(r'\b(private|pvt|limited|ltd|llp|co|company|and|&)\b\.?', ' ', s)
+    s = s.replace('.', ' ')   # "B.R." are two initials, not the word "br"
     return set(re.sub(r'[^a-z0-9 ]', '', s).split())
 
 
@@ -101,11 +103,27 @@ def _names_agree(a: Optional[str], b: Optional[str]) -> Optional[bool]:
     if not sa or not sb:
         return None
     shared = sa & sb
+    # An initial stands for any word starting with that letter: "NAVIN K" is
+    # "KANNUSAMY NAVIN" on a PAN card (director, Skandan Plastrix, 2026-09-18).
+    # Initials only count alongside at least one full shared word.
+    conflict = False
+    for x, y in ((sa, sb), (sb, sa)):
+        for tok in x:
+            if len(tok) != 1:
+                continue
+            if any(w != tok and w[0] == tok for w in y):
+                shared = shared | {tok}
+            elif tok not in y:
+                conflict = True   # an initial nothing on the other side can stand for
+    full_shared = {t for t in shared if len(t) > 1}
+    words_a, words_b = {t for t in sa if len(t) > 1}, {t for t in sb if len(t) > 1}
+    if conflict and words_a and words_a == words_b:
+        return False   # "A PERSON" vs "B PERSON": only the initial differs -- different people
     # One shared word is not agreement -- "EXAMPLE PARTNER" and "ANOTHER PARTNER"
-    # share a word and are different people. Two shared words, or the whole of a
-    # one-word name, is; otherwise fall back to a whole-string character ratio
-    # so an OCR-garbled word ("TRAIING") still counts.
-    if len(shared) >= 2 or (min(len(sa), len(sb)) == 1 and shared):
+    # share a word and are different people. Two shared words (an initial may be
+    # one of them), or the whole of a one-word name, is; otherwise fall back to a
+    # whole-string character ratio so an OCR-garbled word ("TRAIING") still counts.
+    if (len(shared) >= 2 and full_shared) or (min(len(sa), len(sb)) == 1 and shared):
         return True
     from difflib import SequenceMatcher
     return SequenceMatcher(None, " ".join(sorted(sa)), " ".join(sorted(sb))).ratio() >= 0.8

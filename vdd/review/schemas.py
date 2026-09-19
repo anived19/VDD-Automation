@@ -23,7 +23,9 @@ class Finding(BaseModel):
     proposed_value: Optional[Any] = Field(
         default=None,
         description="The corrected value, if action=='correct'. Must be a valid bucket value for this "
-                    "parameter's scoring model, or plain text for a display field.")
+                    "parameter's scoring model, or plain text for a display field. Leave null when only the "
+                    "wording/evidence note is wrong: the value and score are then kept and just the note is "
+                    "replaced by proposed_note.")
     proposed_note: str = Field(
         description="Evidence for this finding -- MUST cite exactly which tool call (name + key result) or "
                     "existing resolver note backs it. Never state a fact with no cited source.")

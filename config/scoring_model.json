@@ -371,12 +371,17 @@
               "expr": "value == \"rented\"",
               "condition": "Rented — rental agreement on record",
               "assignedScore": 1
+            },
+            {
+              "expr": "value == \"address_mismatch\"",
+              "condition": "Premises proof is for a different address than the GST registration",
+              "assignedScore": 0
             }
           ],
           "scoringMethod": "range",
           "inputFieldName": "addr_ownership_type",
           "maxParameterScore": 5,
-          "parameterDescription": "From sale deed / property tax / rental agreement. Submit: owned | leased | rented",
+          "parameterDescription": "From sale deed / property tax / rental agreement. Submit: owned | leased | rented | address_mismatch (added 2026-09-18: the bill / agreement on file is for premises other than the GST-registered address, so it proves nothing about them)",
           "parameterWeightWithinCategory": 1
         },
         {

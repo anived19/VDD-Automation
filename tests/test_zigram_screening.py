@@ -173,3 +173,28 @@ def test_summarize_none_response_reports_not_screened():
 def test_summarize_error_response_surfaces_the_error():
     out = summarize_screen({"_error": "[403] blocked"}, "the entity")
     assert out["_error"] == "[403] blocked"
+
+
+def test_repeated_rows_of_one_list_collapse_to_one_line():
+    """A monthly-republished watchlist returns the same entity once per
+    compilation file (B R Trading Co, 2026-09-19: 19 rows of the Maharashtra
+    GST non-genuine-dealer list, 7,800 characters in the note). One line per
+    list + status, the strongest score, the first source and a count."""
+    resp = _comprehensive_response_with_esic_hit()
+    block = resp["entitychecks"][0]
+    block["Indian Watchlists"] = [{
+        "ListName": "Government of Maharashtra - GST - Non Genuine Dealers", "fuzzy_score": s, "match_status": "Red",
+        "SourceLink": f"https://mahagst.gov.in/files/compilation-{i}.xlsx",
+    } for i, s in enumerate(["95%", "100%", "100%"])] + [{
+        "ListName": "Employees State Insurance Corporation (ESIC) - Defaulters List", "fuzzy_score": "100%",
+        "match_status": "Red", "SourceLink": "https://www.esic.gov.in/x.pdf",
+    }]
+    block["HitsFound"]["Indian Watchlists"] = 4
+    out = summarize_screen(resp, "B R TRADING CO")
+    assert len(out["other"]) == 2
+    gst = next(x for x in out["other"] if "Non Genuine" in x)
+    assert "fuzzy_score=100%" in gst and "3 matching rows" in gst
+    assert "compilation-0.xlsx" in gst and "(+2 more source file(s))" in gst
+    assert gst.count("https://") == 1
+    esic = next(x for x in out["other"] if "ESIC" in x)
+    assert "matching rows" not in esic and "more source" not in esic

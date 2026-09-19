@@ -272,15 +272,33 @@ def apply_corrections(state: ReviewState) -> dict:
 
         if action == "correct" and confidence == "verified":
             pid, field = f.get("parameter_id"), f.get("field")
+            proposed = f.get("proposed_value")
             if pid and pid in resolved:
                 before = resolved[pid]
                 record["before"] = {"value": before.value, "note": before.note}
-                resolved[pid] = Resolved.ok(f.get("proposed_value"), source="llm-review",
-                                             note=f.get("proposed_note", ""))
+                if proposed is None:
+                    # A wording correction: the reviewer objected to how the
+                    # finding was phrased, not to the value. Setting the value
+                    # to None here turned a scored 3/3 into unresolved 0/3
+                    # (Skandan Plastrix, 2026-09-18, com_gst_delay_days).
+                    # Keep the value and the score; replace only the note.
+                    if before.unresolved:
+                        record["reason"] = "note-only correction on an unresolved parameter -- nothing to keep, escalated"
+                        escalations.append(record)
+                        continue
+                    record["note_only"] = True
+                    resolved[pid] = Resolved.ok(before.value, source="llm-review",
+                                                 note=f.get("proposed_note", "") or before.note)
+                else:
+                    resolved[pid] = Resolved.ok(proposed, source="llm-review", note=f.get("proposed_note", ""))
                 corrections.append(record)
             elif field in REPORT_ENTITY_FIELDS:
+                if proposed is None:
+                    record["reason"] = f"action=='correct' on entity field {field!r} with no proposed_value -- escalated instead"
+                    escalations.append(record)
+                    continue
                 record["before"] = {"value": entity.get(field)}
-                entity[field] = f.get("proposed_value")
+                entity[field] = proposed
                 corrections.append(record)
             elif field:
                 # Setting an arbitrary key on `entity` would be logged as a

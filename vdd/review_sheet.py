@@ -10,19 +10,27 @@ reviewer -- no terminal, no web form, no server-side state.
                    the sheet, renders the PDF, writes the updated workbook
 
 Sheets
-  Review         one row per scored parameter: the system's value, meaning,
-                 score, source and evidence, then the analyst's value (a
-                 dropdown of that parameter's valid buckets) and note. Live
-                 preview scores per row, per section and total, as formulas.
+  Review         the analyst's name cell, a score summary, then one row per
+                 scored parameter: the system's value, meaning, score and
+                 evidence, the analyst's value (a dropdown of that parameter's
+                 valid buckets) and note, and a live preview score. The
+                 parameter id, source and original value the software needs
+                 sit in three hidden columns at the right.
   Entity fields  the display fields the report reads, same two analyst columns.
   Documents      each file, the type the system assigned, a "correct type"
-                 dropdown -- applied at classification time on finalise.
+                 dropdown -- applied at classification time on finalise --
+                 and how well it was read.
   Flags          what the run was unsure about: cross-check items, unresolved
                  fields, API errors, extraction warnings, LLM findings.
   Choices        the points table behind the dropdowns and preview formulas.
   Audit          every change ever applied from this workbook: who, when,
                  before, after, note. Carried forward across rounds.
-  Meta           vendor, run date, scoring-model hash, the analyst's name cell.
+  Meta           vendor, run date, scoring-model hash; a fallback name cell.
+
+Layout rules: no frozen panes; every wrapped cell gets an explicit row height
+(Excel does not measure them for a file openpyxl wrote, so without one long
+notes show as a single clipped line); Calibri 11; thin borders; the
+software's columns hidden, not shown.
 
 Precedence on finalise: analyst value > LLM-review correction carried in the
 sheet > the fresh deterministic value. The LLM review is not re-run -- it
@@ -40,7 +48,7 @@ from datetime import date, datetime
 from typing import Any, Optional
 
 from openpyxl import Workbook, load_workbook
-from openpyxl.styles import Alignment, Font, PatternFill, Protection
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Protection, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 
@@ -49,7 +57,7 @@ from vdd.report.build_context import REPORT_ENTITY_FIELDS, _CATEGORY_CODE_PREFIX
 from vdd.resolve.resolvers import Resolved
 from vdd.score.engine import NO_CONSENT_CATEGORY_IDS, ScoreResult, _CMP, _EQ_NUM, _EQ_STR, _RANGE
 
-FONT = "Arial"
+FONT = "Calibri"
 UNRESOLVED = "unresolved"
 IGNORE_DOC = "ignore"
 SOURCE_LLM = "llm-review"
@@ -58,29 +66,42 @@ SOURCE_ANALYST = "analyst"
 S_REVIEW, S_ENTITY, S_DOCS, S_FLAGS, S_CHOICES, S_AUDIT, S_META = (
     "Review", "Entity fields", "Documents", "Flags", "Choices", "Audit", "Meta")
 
-# Review sheet columns (1-based)
-C_CODE, C_PID, C_NAME, C_VALUE, C_MEANING, C_SCORE, C_MAX, C_SOURCE, C_EVIDENCE, C_ANALYST, C_NOTE, C_PREVIEW, C_ORIG = range(1, 14)
-REVIEW_HEADERS = ["Code", "Parameter ID", "Parameter", "System value", "Meaning", "Score", "Max", "Source",
-                  "Evidence", "Analyst value", "Analyst note", "Preview score", "Original system value"]
+# Review sheet columns (1-based). What the analyst reads and edits comes
+# first, left to right in the order they think about it: which parameter,
+# what the system decided and why, then their own value and note. The three
+# columns the software needs to read the sheet back (parameter id, source,
+# original value) sit hidden at the far right.
+C_CODE, C_NAME, C_VALUE, C_MEANING, C_SCORE, C_MAX, C_EVIDENCE, C_ANALYST, C_NOTE, C_PREVIEW, C_PID, C_SOURCE, C_ORIG = range(1, 14)
+C_LAST = C_ORIG
+C_HIDDEN = (C_PID, C_SOURCE, C_ORIG)
+C_TEXT = (C_NAME, C_VALUE, C_MEANING, C_EVIDENCE, C_ANALYST, C_NOTE)   # columns whose text sets the row height
+REVIEW_HEADERS = ["Code", "Parameter", "System value", "Meaning", "Score", "Max", "Evidence",
+                  "Analyst value", "Analyst note", "Preview score", "Parameter ID", "Source", "Original system value"]
+REVIEW_WIDTHS = {C_CODE: 9, C_NAME: 38, C_VALUE: 24, C_MEANING: 30, C_SCORE: 8, C_MAX: 7, C_EVIDENCE: 78,
+                 C_ANALYST: 24, C_NOTE: 46, C_PREVIEW: 10, C_PID: 28, C_SOURCE: 32, C_ORIG: 20}
+ANALYST_CELL = "B3"    # the analyst's name, on the sheet they actually work in
 
 _LIST_FIELDS = ("partners", "declared_hsn")
 _DATE_FIELDS = ("date_of_registration", "date_of_incorporation")
 
-_FILL_INPUT = PatternFill("solid", fgColor="FFF2CC")
+_FILL_INPUT = PatternFill("solid", fgColor="FFF8D6")
 _FILL_HEADER = PatternFill("solid", fgColor="1F3A5F")
-_FILL_SECTION = PatternFill("solid", fgColor="D9E2F3")
-_FILL_SUMMARY = PatternFill("solid", fgColor="EDEDED")
-_FONT_HEADER = Font(name=FONT, size=10, bold=True, color="FFFFFF")
-_FONT_INPUT = Font(name=FONT, size=10, color="0000FF")
-_FONT_BODY = Font(name=FONT, size=10)
-_FONT_BOLD = Font(name=FONT, size=10, bold=True)
-_FONT_TITLE = Font(name=FONT, size=13, bold=True)
-_FONT_MUTED = Font(name=FONT, size=9, italic=True, color="666666")
+_FILL_SECTION = PatternFill("solid", fgColor="E6ECF5")
+_FILL_TOTAL = PatternFill("solid", fgColor="F2F4F7")
+_FONT_HEADER = Font(name=FONT, size=11, bold=True, color="FFFFFF")
+_FONT_INPUT = Font(name=FONT, size=11, color="1D4ED8")
+_FONT_BODY = Font(name=FONT, size=11)
+_FONT_BOLD = Font(name=FONT, size=11, bold=True)
+_FONT_TITLE = Font(name=FONT, size=16, bold=True, color="1F3A5F")
+_FONT_MUTED = Font(name=FONT, size=10, italic=True, color="6B7280")
 _WRAP = Alignment(wrap_text=True, vertical="top")
+_WRAP_CENTER = Alignment(wrap_text=True, vertical="top", horizontal="center")
 _UNLOCKED = Protection(locked=False)
+_SIDE = Side(style="thin", color="D0D5DD")
+_BORDER = Border(left=_SIDE, right=_SIDE, top=_SIDE, bottom=_SIDE)
+_PT_PER_LINE = 15.0     # Calibri 11 -- Excel's default row height
 
 
-# ---------------------------------------------------------------- scoring-model view
 @dataclass
 class ParamSpec:
     parameter_id: str
@@ -164,12 +185,14 @@ def _fmt_value(v: Any) -> Any:
     return v
 
 
-def _style_header(ws, row: int, ncols: int) -> None:
-    for c in range(1, ncols + 1):
+def _style_header(ws, row: int, ncols: int, first_col: int = 1) -> None:
+    for c in range(first_col, first_col + ncols):
         cell = ws.cell(row=row, column=c)
         cell.font = _FONT_HEADER
         cell.fill = _FILL_HEADER
         cell.alignment = Alignment(vertical="center", wrap_text=True)
+        cell.border = _BORDER
+    ws.row_dimensions[row].height = 32
 
 
 def _input_cell(cell) -> None:
@@ -177,6 +200,56 @@ def _input_cell(cell) -> None:
     cell.font = _FONT_INPUT
     cell.protection = _UNLOCKED
     cell.alignment = _WRAP
+    cell.border = _BORDER
+
+
+def _body_cell(cell, font=None, align=None) -> None:
+    cell.font = font or _FONT_BODY
+    cell.alignment = align or _WRAP
+    cell.border = _BORDER
+
+
+def _wrapped_lines(text, width: float) -> int:
+    """How many lines `text` takes when wrapped in a column `width` units wide.
+    Excel does not re-measure row heights for a file written by openpyxl, so
+    without an explicit height every wrapped cell shows one line and the
+    rest is hidden -- the workbook looked like a wall of clipped text."""
+    if text is None or (isinstance(text, str) and text.startswith("=")):
+        return 1
+    per_line = max(6, int(width * 1.1))
+    return sum(max(1, -(-len(par) // per_line)) for par in str(text).split("\n"))
+
+
+def _fit_row_heights(ws, first: int, last: int, widths: dict, cols=None, max_lines: int = 24) -> None:
+    for row in range(first, last + 1):
+        lines = 1
+        for c, w in widths.items():
+            if cols is not None and c not in cols:
+                continue
+            if ws.column_dimensions[get_column_letter(c)].hidden:
+                continue
+            lines = max(lines, _wrapped_lines(ws.cell(row=row, column=c).value, w))
+        ws.row_dimensions[row].height = min(lines, max_lines) * _PT_PER_LINE + 3
+
+
+def _note_row(ws, text: str, ncols: int, height: float = 32) -> None:
+    """Row 1 of the secondary sheets: one muted sentence, merged across the
+    sheet's columns so it wraps instead of running off the right edge."""
+    ws["A1"] = text
+    ws["A1"].font = _FONT_MUTED
+    ws["A1"].alignment = Alignment(wrap_text=True, vertical="top")
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=ncols)
+    ws.row_dimensions[1].height = height
+
+
+def _finish_sheet(ws, widths: dict, protect: bool = True) -> None:
+    for c, w in widths.items():
+        ws.column_dimensions[get_column_letter(c)].width = w
+    ws.sheet_view.showGridLines = False
+    if protect:
+        ws.protection.sheet = True
+        ws.protection.formatColumns = False
+        ws.protection.formatRows = False
 
 
 def write_review_workbook(path: str, *, vendor_name: str, entity: dict, resolved: dict, result: ScoreResult,
@@ -195,34 +268,40 @@ def write_review_workbook(path: str, *, vendor_name: str, entity: dict, resolved
     ws = wb.active
     ws.title = S_REVIEW
 
-    # ---- title + legend
+    # ---- title, one-line instructions, analyst name
     ws["A1"] = f"VDD review -- {vendor_name}"
     ws["A1"].font = _FONT_TITLE
-    ws["A2"] = ("How to use: change only the yellow cells. 'Analyst value' is a dropdown of the valid choices for that "
-                "row (or a number for the two numeric rows); pick 'unresolved' to mark a parameter as not "
-                "determinable. Write why in 'Analyst note' -- it is printed in the report as the evidence for your "
-                "change. Put your name on the Meta sheet. Preview scores update as you edit; the final score is "
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=C_PREVIEW)
+    ws.row_dimensions[1].height = 26
+    ws["A2"] = ("Edit only the yellow cells. 'Analyst value' is a dropdown of that row's valid results (a number for "
+                "the numeric rows; 'unresolved' if it cannot be determined) and 'Analyst note' is printed in the "
+                "report as the evidence for your change. Preview scores update as you type; the final score is "
                 "recomputed when the sheet is submitted.")
     ws["A2"].font = _FONT_MUTED
     ws["A2"].alignment = Alignment(wrap_text=True, vertical="top")
-    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=C_ORIG)
-    ws.row_dimensions[2].height = 48
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=C_PREVIEW)
+    ws.row_dimensions[2].height = 34
+    ws["A3"] = "Analyst"
+    ws["A3"].font = _FONT_BOLD
+    ws["A3"].alignment = Alignment(vertical="center")
+    name_cell = ws[ANALYST_CELL]
+    name_cell.value = analyst_name or None
+    _input_cell(name_cell)
+    name_cell.alignment = Alignment(vertical="center")
+    ws.row_dimensions[3].height = 20
 
-    # ---- summary block (filled with formulas once the table rows are known)
-    summary_top = 4
-    ws.cell(row=summary_top, column=1, value="Section").font = _FONT_BOLD
-    ws.cell(row=summary_top, column=2, value="System score").font = _FONT_BOLD
-    ws.cell(row=summary_top, column=3, value="Max").font = _FONT_BOLD
-    ws.cell(row=summary_top, column=4, value="Preview score").font = _FONT_BOLD
-    for c in range(1, 5):
-        ws.cell(row=summary_top, column=c).fill = _FILL_SUMMARY
+    # ---- score summary (formulas filled in once the table rows are known)
+    summary_top = 5
+    for c, h in zip((1, 3, 4, 5), ("Section", "System score", "Max", "Preview score")):
+        ws.cell(row=summary_top, column=c, value=h)
+    ws.merge_cells(start_row=summary_top, start_column=1, end_row=summary_top, end_column=2)
+    _style_header(ws, summary_top, 5)
 
     # ---- parameter table
     table_header = summary_top + len(result.categories) + 3
     for c, h in enumerate(REVIEW_HEADERS, start=1):
         ws.cell(row=table_header, column=c, value=h)
     _style_header(ws, table_header, len(REVIEW_HEADERS))
-    ws.freeze_panes = ws.cell(row=table_header + 1, column=C_NAME + 1)
 
     row = table_header + 1
     category_rows: list[tuple[str, int, int, int]] = []   # (category name, header row, first param row, last param row)
@@ -231,9 +310,13 @@ def write_review_workbook(path: str, *, vendor_name: str, entity: dict, resolved
         cat_row = row
         ws.cell(row=row, column=C_CODE, value=prefix)
         ws.cell(row=row, column=C_NAME, value=cat.category_name)
-        for c in range(1, len(REVIEW_HEADERS) + 1):
-            ws.cell(row=row, column=c).fill = _FILL_SECTION
-            ws.cell(row=row, column=c).font = _FONT_BOLD
+        for c in range(1, C_LAST + 1):
+            cell = ws.cell(row=row, column=c)
+            cell.fill = _FILL_SECTION
+            cell.font = _FONT_BOLD
+            cell.border = _BORDER
+            cell.alignment = Alignment(vertical="center")
+        ws.row_dimensions[row].height = 22
         row += 1
         first = row
         for i, p in enumerate(cat.params, start=1):
@@ -242,14 +325,14 @@ def write_review_workbook(path: str, *, vendor_name: str, entity: dict, resolved
             o = original_resolved.get(p.parameter_id)
             source = (r.source if r is not None else "") or ""
             ws.cell(row=row, column=C_CODE, value=f"{prefix}-{i:02d}")
-            ws.cell(row=row, column=C_PID, value=p.parameter_id)
             ws.cell(row=row, column=C_NAME, value=p.parameter_name)
             ws.cell(row=row, column=C_VALUE, value=_fmt_value(None if p.unresolved else p.value))
             ws.cell(row=row, column=C_MEANING, value=(UNRESOLVED if p.unresolved else (p.matched_condition or "")))
             ws.cell(row=row, column=C_SCORE, value=p.assigned_score)
             ws.cell(row=row, column=C_MAX, value=(spec.max_score if spec else p.max_score))
-            ws.cell(row=row, column=C_SOURCE, value=source)
             ws.cell(row=row, column=C_EVIDENCE, value=(p.note or ""))
+            ws.cell(row=row, column=C_PID, value=p.parameter_id)
+            ws.cell(row=row, column=C_SOURCE, value=source)
             ws.cell(row=row, column=C_ORIG, value=_fmt_value(None if (o is None or o.unresolved) else o.value))
             for c in (C_ANALYST, C_NOTE):
                 _input_cell(ws.cell(row=row, column=c))
@@ -274,46 +357,59 @@ def write_review_workbook(path: str, *, vendor_name: str, entity: dict, resolved
             ws.add_data_validation(dv)
             dv.add(ref)
             ws.cell(row=row, column=C_PREVIEW, value=preview)
-            for c in range(1, len(REVIEW_HEADERS) + 1):
-                cell = ws.cell(row=row, column=c)
+            for c in range(1, C_LAST + 1):
                 if c not in (C_ANALYST, C_NOTE):
-                    cell.font = _FONT_BODY
-                    cell.alignment = _WRAP
+                    _body_cell(ws.cell(row=row, column=c),
+                               align=(_WRAP_CENTER if c in (C_CODE, C_SCORE, C_MAX, C_PREVIEW) else _WRAP))
             row += 1
         last = row - 1
         sc, mx, pv = get_column_letter(C_SCORE), get_column_letter(C_MAX), get_column_letter(C_PREVIEW)
         ws.cell(row=cat_row, column=C_SCORE, value=f"=SUM({sc}{first}:{sc}{last})")
         ws.cell(row=cat_row, column=C_MAX, value=f"=SUM({mx}{first}:{mx}{last})")
         ws.cell(row=cat_row, column=C_PREVIEW, value=f"=SUM({pv}{first}:{pv}{last})")
+        for c in (C_SCORE, C_MAX, C_PREVIEW):
+            ws.cell(row=cat_row, column=c).alignment = Alignment(horizontal="center", vertical="center")
         category_rows.append((cat.category_name, cat_row, first, last))
 
     # ---- summary formulas
     srow = summary_top + 1
     for name, cat_row, _f, _l in category_rows:
-        ws.cell(row=srow, column=1, value=name).font = _FONT_BODY
-        ws.cell(row=srow, column=2, value=f"={get_column_letter(C_SCORE)}{cat_row}")
-        ws.cell(row=srow, column=3, value=f"={get_column_letter(C_MAX)}{cat_row}")
-        ws.cell(row=srow, column=4, value=f"={get_column_letter(C_PREVIEW)}{cat_row}")
+        ws.cell(row=srow, column=1, value=name)
+        ws.merge_cells(start_row=srow, start_column=1, end_row=srow, end_column=2)
+        ws.cell(row=srow, column=3, value=f"={get_column_letter(C_SCORE)}{cat_row}")
+        ws.cell(row=srow, column=4, value=f"={get_column_letter(C_MAX)}{cat_row}")
+        ws.cell(row=srow, column=5, value=f"={get_column_letter(C_PREVIEW)}{cat_row}")
+        for c in range(1, 6):
+            _body_cell(ws.cell(row=srow, column=c), align=Alignment(horizontal="center" if c > 2 else "left",
+                                                                    vertical="center"))
+        ws.row_dimensions[srow].height = 18
         srow += 1
-    ws.cell(row=srow, column=1, value="TOTAL (/100)").font = _FONT_BOLD
-    ws.cell(row=srow, column=2, value=f"=SUM(B{summary_top + 1}:B{srow - 1})").font = _FONT_BOLD
-    ws.cell(row=srow, column=3, value=f"=SUM(C{summary_top + 1}:C{srow - 1})").font = _FONT_BOLD
-    ws.cell(row=srow, column=4, value=f"=SUM(D{summary_top + 1}:D{srow - 1})").font = _FONT_BOLD
-    ws.cell(row=srow + 1, column=1, value="On-Site Verification, 3B/2B and ITR are Pending (not scored in v1).").font = _FONT_MUTED
+    ws.cell(row=srow, column=1, value="TOTAL (/100)")
+    ws.merge_cells(start_row=srow, start_column=1, end_row=srow, end_column=2)
+    ws.cell(row=srow, column=3, value=f"=SUM(C{summary_top + 1}:C{srow - 1})")
+    ws.cell(row=srow, column=4, value=f"=SUM(D{summary_top + 1}:D{srow - 1})")
+    ws.cell(row=srow, column=5, value=f"=SUM(E{summary_top + 1}:E{srow - 1})")
+    for c in range(1, 6):
+        cell = ws.cell(row=srow, column=c)
+        _body_cell(cell, font=_FONT_BOLD, align=Alignment(horizontal="center" if c > 2 else "left", vertical="center"))
+        cell.fill = _FILL_TOTAL
+    ws.row_dimensions[srow].height = 20
+    ws.cell(row=srow + 1, column=1,
+            value="On-Site Verification, 3B/2B and ITR are Pending (not scored in v1).").font = _FONT_MUTED
+    ws.merge_cells(start_row=srow + 1, start_column=1, end_row=srow + 1, end_column=C_PREVIEW)
 
-    widths = {C_CODE: 9, C_PID: 26, C_NAME: 34, C_VALUE: 18, C_MEANING: 30, C_SCORE: 7, C_MAX: 6, C_SOURCE: 26,
-              C_EVIDENCE: 60, C_ANALYST: 20, C_NOTE: 40, C_PREVIEW: 9, C_ORIG: 16}
-    for c, w in widths.items():
-        ws.column_dimensions[get_column_letter(c)].width = w
-    ws.protection.sheet = True
-    ws.protection.formatColumns = False
-    ws.protection.formatRows = False
+    for c in C_HIDDEN:
+        ws.column_dimensions[get_column_letter(c)].hidden = True
+    _finish_sheet(ws, REVIEW_WIDTHS)
+    _fit_row_heights(ws, table_header + 1, row - 1, REVIEW_WIDTHS, cols=set(C_TEXT))
+    for _name, cat_row, _f, _l in category_rows:
+        ws.row_dimensions[cat_row].height = 22
 
-    _write_choices(wb, specs)
     _write_entity(wb, entity)
     _write_documents(wb, docs, list(document_reads))
-    _write_flags(wb, cross_check_items, unresolved_fields, missing_documents, api_errors, warnings,
-                 llm_findings, llm_corrections)
+    _write_flags(wb, _untruncated(cross_check_items, resolved), unresolved_fields, missing_documents, api_errors,
+                 warnings, llm_findings, llm_corrections)
+    _write_choices(wb, specs)
     _write_audit(wb, audit_rows)
     _write_meta(wb, vendor_name, scoring_model_path, report_date, review_summary, analyst_name)
 
@@ -324,68 +420,57 @@ def write_review_workbook(path: str, *, vendor_name: str, entity: dict, resolved
 
 def _write_choices(wb: Workbook, specs: dict[str, ParamSpec]) -> None:
     ws = wb.create_sheet(S_CHOICES)
+    _note_row(ws, "The points behind every dropdown option on the Review sheet. Read-only.", 5, height=20)
     for c, h in enumerate(["Key", "Parameter ID", "Value", "Meaning", "Points"], start=1):
-        ws.cell(row=1, column=c, value=h)
-    _style_header(ws, 1, 5)
-    row = 2
+        ws.cell(row=2, column=c, value=h)
+    _style_header(ws, 2, 5)
+    row = 3
     for spec in specs.values():
         for value, label, points in spec.buckets:
-            ws.cell(row=row, column=1, value=f"{spec.parameter_id}|{value}")
-            ws.cell(row=row, column=2, value=spec.parameter_id)
-            ws.cell(row=row, column=3, value=value)
-            ws.cell(row=row, column=4, value=label)
-            ws.cell(row=row, column=5, value=points)
+            for c, v in enumerate((f"{spec.parameter_id}|{value}", spec.parameter_id, value, label, points), start=1):
+                _body_cell(ws.cell(row=row, column=c))
+                ws.cell(row=row, column=c).value = v
             row += 1
         for expr, label, points in spec.exprs:
-            ws.cell(row=row, column=1, value=f"{spec.parameter_id}|{expr}")
-            ws.cell(row=row, column=2, value=spec.parameter_id)
-            ws.cell(row=row, column=3, value=expr)
-            ws.cell(row=row, column=4, value=label)
-            ws.cell(row=row, column=5, value=points)
+            for c, v in enumerate((f"{spec.parameter_id}|{expr}", spec.parameter_id, expr, label, points), start=1):
+                _body_cell(ws.cell(row=row, column=c))
+                ws.cell(row=row, column=c).value = v
             row += 1
-    for r in ws.iter_rows(min_row=2, max_row=row):
-        for cell in r:
-            cell.font = _FONT_BODY
-    for col, w in zip("ABCDE", (40, 26, 24, 44, 8)):
-        ws.column_dimensions[col].width = w
-    ws.protection.sheet = True
+    widths = {1: 40, 2: 28, 3: 26, 4: 48, 5: 8}
+    _finish_sheet(ws, widths)
+    _fit_row_heights(ws, 3, row - 1, widths)
 
 
 def _write_entity(wb: Workbook, entity: dict) -> None:
     ws = wb.create_sheet(S_ENTITY)
-    ws["A1"] = "Display fields the report reads. Change only the yellow cells; dates as dd/mm/yyyy; lists separated by ';'."
-    ws["A1"].font = _FONT_MUTED
+    _note_row(ws, "The fields the report prints. To correct one, write the new value in the yellow cell "
+                  "(dates as dd/mm/yyyy; lists separated by ';') and say why in the note.", 4)
     for c, h in enumerate(["Field", "System value", "Analyst value", "Analyst note"], start=1):
         ws.cell(row=2, column=c, value=h)
     _style_header(ws, 2, 4)
     row = 3
     for f in REPORT_ENTITY_FIELDS:
-        ws.cell(row=row, column=1, value=f).font = _FONT_BODY
-        v = ws.cell(row=row, column=2, value=_fmt_value(entity.get(f)))
-        v.font = _FONT_BODY
-        v.alignment = _WRAP
+        _body_cell(ws.cell(row=row, column=1, value=f))
+        _body_cell(ws.cell(row=row, column=2, value=_fmt_value(entity.get(f))))
         for c in (3, 4):
             cell = ws.cell(row=row, column=c)
             _input_cell(cell)
             cell.number_format = "@"
         row += 1
-    for col, w in zip("ABCD", (34, 60, 40, 40)):
-        ws.column_dimensions[col].width = w
-    ws.freeze_panes = "A3"
-    ws.protection.sheet = True
-    ws.protection.formatColumns = False
+    widths = {1: 34, 2: 70, 3: 40, 4: 44}
+    _finish_sheet(ws, widths)
+    _fit_row_heights(ws, 3, row - 1, widths)
 
 
 def _write_documents(wb: Workbook, docs: Optional[ClassifiedDocs], reads: Optional[list] = None) -> None:
     ws = wb.create_sheet(S_DOCS)
-    ws["A1"] = ("Each file, the document type the system assigned, and how well it was read. To correct a type, "
-                "pick the right one under 'Correct type' ('ignore' = not a KYC document). Applied when the sheet "
-                "is submitted. A POOR/PARTIAL read lists the fields that could not be recovered -- re-scan or "
-                "re-upload if they matter.")
-    ws["A1"].font = _FONT_MUTED
-    for c, h in enumerate(["File", "Detected type", "Correct type", "Note", "Read quality", "Read via", "Missing fields"], start=1):
+    headers = ["File", "Detected type", "Correct type", "Note", "Read quality", "Read via", "Missing fields / reason"]
+    _note_row(ws, "Each file, the document type the system assigned, and how well it was read. To correct a type, "
+                  "pick the right one under 'Correct type' ('ignore' = not a KYC document). A POOR/PARTIAL read "
+                  "lists the fields that could not be recovered; an UNREADABLE file says why.", len(headers))
+    for c, h in enumerate(headers, start=1):
         ws.cell(row=2, column=c, value=h)
-    _style_header(ws, 2, 7)
+    _style_header(ws, 2, len(headers))
     quality = {r.name: r for r in (reads or [])}
     rows = []
     if docs is not None:
@@ -401,35 +486,67 @@ def _write_documents(wb: Workbook, docs: Optional[ClassifiedDocs], reads: Option
     ws.add_data_validation(dv)
     row = 3
     for fname, dtype in rows:
-        ws.cell(row=row, column=1, value=fname).font = _FONT_BODY
-        ws.cell(row=row, column=2, value=dtype).font = _FONT_BODY
+        _body_cell(ws.cell(row=row, column=1, value=fname))
+        _body_cell(ws.cell(row=row, column=2, value=dtype))
         for c in (3, 4):
             _input_cell(ws.cell(row=row, column=c))
         dv.add(f"C{row}")
+        for c in (5, 6, 7):
+            _body_cell(ws.cell(row=row, column=c))
         r = quality.get(fname)
         if r is not None:
             q = ws.cell(row=row, column=5, value=r.quality.upper())
-            q.font = Font(name=FONT, size=10, bold=r.quality != "read",
+            q.font = Font(name=FONT, size=11, bold=r.quality != "read",
                           color={"read": "1E7F4F", "partial": "B7791F", "poor": "B42318", "unreadable": "B42318"}[r.quality])
-            ws.cell(row=row, column=6, value=r.method).font = _FONT_BODY
+            q.alignment = _WRAP_CENTER
+            ws.cell(row=row, column=6, value=r.method)
             # For a file that could not be read at all, the reason is more
             # useful than a list of every field it would have carried.
-            detail = r.reason if (r.quality == "unreadable" and r.reason) else ", ".join(r.missing)
-            ws.cell(row=row, column=7, value=detail).font = _FONT_BODY
+            ws.cell(row=row, column=7, value=(r.reason if (r.quality == "unreadable" and r.reason)
+                                              else ", ".join(r.missing)))
         elif dtype == "unmatched":
-            ws.cell(row=row, column=5, value="UNMATCHED").font = Font(name=FONT, size=10, bold=True, color="B7791F")
+            q = ws.cell(row=row, column=5, value="UNMATCHED")
+            q.font = Font(name=FONT, size=11, bold=True, color="B7791F")
+            q.alignment = _WRAP_CENTER
         row += 1
-    for col, w in zip("ABCDEFG", (60, 22, 22, 40, 13, 16, 40)):
-        ws.column_dimensions[col].width = w
-    ws.protection.sheet = True
-    ws.protection.formatColumns = False
+    widths = {1: 52, 2: 22, 3: 22, 4: 40, 5: 14, 6: 16, 7: 48}
+    _finish_sheet(ws, widths)
+    _fit_row_heights(ws, 3, row - 1, widths)
+
+
+def _untruncated(items, resolved: dict) -> list:
+    """Cross-check items are cut to ~220 characters for the terminal and the
+    reviewer's prompt; the analyst gets the whole note."""
+    out = []
+    for item in items:
+        pid, sep, rest = str(item).partition(": ")
+        r = resolved.get(pid) if sep else None
+        note = (getattr(r, "note", "") or "") if r is not None else ""
+        if rest.endswith("...") and note.startswith(rest[:-3]):
+            out.append(f"{pid}: {note}")
+        else:
+            out.append(item)
+    return out
+
+
+def _split_flag(item: str) -> tuple[str, str]:
+    """'addr_msme: WARNING: ...' -> ('addr_msme', 'WARNING: ...'); a line with
+    no short head stays whole in the detail column."""
+    text = str(item)
+    head, sep, rest = text.partition(": ")
+    if sep and 0 < len(head) <= 48 and rest:
+        return head, rest
+    return "", text
 
 
 def _write_flags(wb: Workbook, cross_check_items, unresolved_fields, missing_documents, api_errors, warnings,
                  llm_findings, llm_corrections) -> None:
     ws = wb.create_sheet(S_FLAGS)
-    ws["A1"] = "What the system was unsure about in this run. Read-only."
-    ws["A1"].font = _FONT_MUTED
+    _note_row(ws, "What the system was unsure about in this run. Read-only -- act on it through the Review, "
+                  "Entity fields and Documents sheets.", 2, height=20)
+    for c, h in enumerate(["Where", "Detail"], start=1):
+        ws.cell(row=2, column=c, value=h)
+    _style_header(ws, 2, 2)
     row = 3
     sections = [
         ("Missing document types", list(missing_documents)),
@@ -443,20 +560,31 @@ def _write_flags(wb: Workbook, cross_check_items, unresolved_fields, missing_doc
         ("Extraction warnings", list(warnings)),
     ]
     for title, items in sections:
-        ws.cell(row=row, column=1, value=title).font = _FONT_BOLD
-        ws.cell(row=row, column=1).fill = _FILL_SECTION
+        ws.cell(row=row, column=1, value=f"{title} ({len(items)})")
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=2)
+        for c in (1, 2):
+            cell = ws.cell(row=row, column=c)
+            cell.font = _FONT_BOLD
+            cell.fill = _FILL_SECTION
+            cell.border = _BORDER
+            cell.alignment = Alignment(vertical="center")
+        ws.row_dimensions[row].height = 22
         row += 1
         if not items:
-            ws.cell(row=row, column=1, value="(none)").font = _FONT_MUTED
+            _body_cell(ws.cell(row=row, column=1))
+            _body_cell(ws.cell(row=row, column=2, value="(none)"), font=_FONT_MUTED)
             row += 1
         for item in items:
-            cell = ws.cell(row=row, column=1, value=str(item))
-            cell.font = _FONT_BODY
-            cell.alignment = _WRAP
+            where, detail = _split_flag(item)
+            _body_cell(ws.cell(row=row, column=1, value=where or None))
+            _body_cell(ws.cell(row=row, column=2, value=detail))
             row += 1
-        row += 1
-    ws.column_dimensions["A"].width = 140
-    ws.protection.sheet = True
+    widths = {1: 34, 2: 120}
+    _finish_sheet(ws, widths)
+    _fit_row_heights(ws, 3, row - 1, widths)
+    for r in range(3, row):
+        if ws.cell(row=r, column=1).fill == _FILL_SECTION:
+            ws.row_dimensions[r].height = 22
 
 
 AUDIT_HEADERS = ["When", "Who", "Kind", "Id", "Before", "After", "Note", "Status"]
@@ -469,12 +597,10 @@ def _write_audit(wb: Workbook, audit_rows) -> None:
     _style_header(ws, 1, len(AUDIT_HEADERS))
     for i, r in enumerate(audit_rows, start=2):
         for c, h in enumerate(AUDIT_HEADERS, start=1):
-            cell = ws.cell(row=i, column=c, value=_fmt_value(r.get(h.lower())))
-            cell.font = _FONT_BODY
-            cell.alignment = _WRAP
-    for col, w in zip("ABCDEFGH", (18, 18, 10, 28, 22, 22, 50, 22)):
-        ws.column_dimensions[col].width = w
-    ws.protection.sheet = True
+            _body_cell(ws.cell(row=i, column=c, value=_fmt_value(r.get(h.lower()))))
+    widths = dict(zip(range(1, 9), (18, 18, 10, 30, 24, 24, 56, 22)))
+    _finish_sheet(ws, widths)
+    _fit_row_heights(ws, 2, len(audit_rows) + 1, widths)
 
 
 META_KEYS = ("Vendor", "Run date", "Report date", "Scoring model hash", "LLM review", "Analyst name")
@@ -492,16 +618,16 @@ def _write_meta(wb: Workbook, vendor_name: str, scoring_model_path: str, report_
         "Analyst name": analyst_name,
     }
     for i, k in enumerate(META_KEYS, start=1):
-        ws.cell(row=i, column=1, value=k).font = _FONT_BOLD
+        _body_cell(ws.cell(row=i, column=1, value=k), font=_FONT_BOLD)
         cell = ws.cell(row=i, column=2, value=values[k])
-        cell.font = _FONT_BODY
+        _body_cell(cell)
         if k == "Analyst name":
             _input_cell(cell)
     ws.cell(row=len(META_KEYS) + 2, column=1,
-            value="Yellow cells are yours to edit. Everything else is regenerated when the sheet is submitted.").font = _FONT_MUTED
-    ws.column_dimensions["A"].width = 22
-    ws.column_dimensions["B"].width = 60
-    ws.protection.sheet = True
+            value="The analyst's name is taken from the Review sheet's yellow cell; this one is a fallback.").font = _FONT_MUTED
+    widths = {1: 22, 2: 70}
+    _finish_sheet(ws, widths)
+    _fit_row_heights(ws, 1, len(META_KEYS), widths)
 
 
 # ---------------------------------------------------------------- reading
@@ -546,7 +672,11 @@ def read_review_workbook(path: str) -> ReviewSheet:
         sheet.analyst_name = meta.get("Analyst name", "")
         sheet.model_hash = meta.get("Scoring model hash", "")
     ws = wb[S_REVIEW]
-    for r in ws.iter_rows(min_row=1, max_col=C_ORIG):
+    # The name cell on the Review sheet wins; Meta's is the fallback (and
+    # what older workbooks carry).
+    if _cell_str(ws[ANALYST_CELL].value):
+        sheet.analyst_name = _cell_str(ws[ANALYST_CELL].value)
+    for r in ws.iter_rows(min_row=1, max_col=C_LAST):
         pid = _cell_str(r[C_PID - 1].value)
         # Only parameter rows carry an id here; the summary block's formulas and
         # the header text also land in this column and must be skipped.
