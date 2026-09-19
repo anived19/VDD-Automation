@@ -55,8 +55,43 @@ def clean_bank(s):
     return " ".join(out)
 
 
+# A labelled value runs up to the next label ("District:", "State:", "PIN
+# Code:", "Pin 500055") or the end of the string.
+_LABEL_END = r'(?=\s*,?\s*\b(?:district|state|pin(?:\s*code)?|pincode|country)\b\s*:?|$)'
+_CITY_LABELS = [re.compile(r'(?i)\b' + lab + r'\s*:\s*([^:]+?)\s*,?' + _LABEL_END) for lab in (
+    r'city\s*/\s*town\s*/\s*village',   # GST certificate
+    r'city',                             # Udyam certificate
+    r'village\s*/\s*town', r'town', r'village')]
+_STATE_LABEL = re.compile(r'(?i)\bstate\s*:\s*([^:]+?)\s*,?' + _LABEL_END)
+_DISTRICT_LABEL = re.compile(r'(?i)\bdistrict\s*:\s*([^:]+?)\s*,?' + _LABEL_END)
+
+
+def _titled(s):
+    return " ".join(w if w.isupper() and len(w) <= 3 else w.capitalize() for w in s.split())
+
+
 def location(addr):
-    """Derive a short 'City, State' label from a full registered-office address string."""
+    """Derive a short 'City, State' label from a registered-office address.
+
+    A GST-certificate or Udyam address arrives as labelled fields
+    ('... City/Town/Village: Hyderabad District: Medchal Malkajgiri State:
+    Telangana PIN Code: 500055'); those are read directly. The comma-split
+    heuristic below is only for an unlabelled free-text address -- it used
+    to run on the labelled string too, split on '/', and pick the label
+    fragment 'Town' (from 'City/Town/Village') as the city: every report
+    read "Town, <State>"."""
+    m_city = next((m for m in (rx.search(addr) for rx in _CITY_LABELS) if m), None)
+    m_state = _STATE_LABEL.search(addr)
+    if m_city or m_state:
+        city = _titled(m_city.group(1)) if m_city else ""
+        if not city:
+            m_d = _DISTRICT_LABEL.search(addr)
+            city = _titled(m_d.group(1)) if m_d else ""
+        state = _titled(m_state.group(1)) if m_state else ""
+        for s_ in STATES:   # canonical spelling/case for the state
+            if state and s_.lower() == state.lower():
+                state = s_
+        return ", ".join(x for x in (city, state) if x) or addr
     addr = re.split(r'[(]', addr)[0]
     parts = [p.strip() for p in re.split(r'[,/]', addr) if p.strip()]
     idx = st = None
@@ -291,7 +326,7 @@ def build(d):
     annex += sect("ITR ANALYSIS", 0, True) + row("ITR-01", "ITR Filing History &amp; Tax Compliance", "Pending &mdash; ITR documents not submitted")
     annex += '</tbody></table></div>'
 
-    ftr = '<div class="ftr"><div class="ftr-brand"><strong>finoscale.ai</strong> &nbsp;&middot;&nbsp; Seller Intelligence &amp; KYC Platform</div><div class="ftr-disclaimer">This report is generated for platform use only. Scores are based on available data at the time of assessment. Finoscale does not guarantee accuracy of third-party data. For queries: www.finoscale.ai</div></div>'
+    ftr = '<div class="ftr"><div class="ftr-brand"><strong>finoscale.ai</strong></div><div class="ftr-disclaimer">For queries: www.finoscale.ai</div></div>'
 
     head = HEAD.replace("KASHI ENTERPRISES &mdash; Seller Intelligence Report", d['firm'] + " &mdash; Seller Intelligence Report")
     return head + hdr + scoreband + prog + unlock + bodygrid + profile + hsn + findings + annex + ftr + '\n</div></body></html>'
@@ -375,23 +410,23 @@ def render_pdf(html, out_pdf):
         css = f'@page {{ size: 960px {h}px; margin: 0; }} html,body{{width:960px;background:#F1F3F7;}}'
         return weasyprint.HTML(string=css_html + f'<style>{css}</style>', base_url='file://' + hp).write_pdf(presentational_hints=True)
 
-    best = None
-    for h in range(4200, 2999, -100):  # coarse
-        pdf = render(h)
+    # The report is one tall page sized to its content. Grow the page until
+    # everything fits (a fixed 4200px ceiling used to spill the footer -- and
+    # sometimes the annex -- onto a second, otherwise blank page once a report
+    # carried more notes), then binary-search down to the tightest height.
+    lo, hi = 3000, 4200
+    pdf = render(hi)
+    while _pdf_page_count(pdf) > 1 and hi < 40000:
+        lo, hi = hi, hi * 2
+        pdf = render(hi)
+    best = (hi, pdf)
+    while hi - lo > 10:
+        mid = (lo + hi) // 2
+        pdf = render(mid)
         if _pdf_page_count(pdf) == 1:
-            best = (h, pdf)
-        elif best:
-            break
-    if not best:
-        best = (4200, render(4200))
-    h = best[0] - 10  # fine
-    while h > 2999:
-        pdf = render(h)
-        if _pdf_page_count(pdf) == 1:
-            best = (h, pdf)
-            h -= 10
+            hi, best = mid, (mid, pdf)
         else:
-            break
+            lo = mid
     open(out_pdf, 'wb').write(best[1])
     return best[0]
 

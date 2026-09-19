@@ -1,99 +1,170 @@
-feat: read-quality, cross-document consistency, format handling, API cache expiry, kind-aware address matching
+fix: PDF page/footer/header, invisible evidence text, LLM note-only corrections, TANGEDCO bill, parser gaps, Zigram dedupe; feat: address_mismatch bucket, readable analyst workbook
 
-Five things the two real vendor folders (Sri Laxmi Steel, B R Trading Co,
-17-18 Sep) showed would fail silently on the next folder -- blurry cards,
-wrong-folder files, locked PDFs, stale registry answers, incomparable
-premises numbers. Each is now a plain line in the run output, the
-workbook's Flags/Documents sheets and the reviewer's prompt. None of them
-changes a score by itself except the last.
+PDF (vdd/report/render.py, assets/template_head.html)
+  The report is one tall page sized to its content, but the height search
+  stopped at 4200px. A report with more notes than that (Sri Laxmi Steel
+  needs ~4460px now that the address and consistency notes are fuller)
+  overflowed onto a second page carrying only the footer -- or part of the
+  annex -- and otherwise blank. The page now grows (doubling) until the
+  content fits, then binary-searches down to the tightest height; nothing
+  is capped short of 40000px.
+  The footer is now just "finoscale.ai" on the left and "For queries:
+  www.finoscale.ai" on the right; the tagline and the disclaimer paragraph
+  are gone, and the query line is legible instead of 25% white on slate.
 
-Read quality per document (vdd/extract/consistency.py, new)
-  Every file gets a quality: READ / PARTIAL / POOR / UNREADABLE, from how
-  many of the fields that document type normally carries (EXPECTED_FIELDS)
-  were actually recovered, plus the method (text layer / OCR). A blurry
-  PAN card that yielded no number is "BRT_pan.pdf (pan_entity): PARTIAL
-  READ via easyocr -- missing pan", not a mysteriously unresolved score
-  three rows later. Shown in the Documents sheet (three new columns, colour
-  coded) and the webapp's verification panel.
+Analyst review workbook (vdd/review_sheet.py -- writer rewritten, reader
+and applier unchanged)
+  The workbook the analysts were handed was unreadable: 13 columns with the
+  software's ids in the middle, frozen panes, and every long evidence note
+  clipped to one 15pt line because Excel does not measure row heights for a
+  file openpyxl wrote.
+  - Review sheet, left to right: Code, Parameter, System value, Meaning,
+    Score, Max, Evidence, Analyst value, Analyst note, Preview score. The
+    parameter id, source and original value the software reads back are
+    still there but hidden (columns K-M); unhide if needed.
+  - Every row gets an explicit height from its longest wrapped cell, so a
+    five-line evidence note shows as five lines. Calibri 11, thin borders,
+    gridlines off, section rows tinted, totals row shaded.
+  - No frozen panes on any sheet.
+  - The analyst's name is a yellow cell at the top of the Review sheet
+    (B3), read back from there; Meta's name cell remains as the fallback so
+    older workbooks still work.
+  - Score summary (System / Max / Preview per section and total) sits
+    between the instructions and the table; title and notes are merged
+    across the visible columns.
+  - Flags sheet is two columns, "Where" and "Detail", so a parameter id or
+    filename is separable from its message; section headers carry counts;
+    cross-check items are the full notes, not the 220-character terminal
+    cut.
+  - Documents sheet: same columns, last one is "Missing fields / reason".
+  - Sheet order is the order of work: Review, Entity fields, Documents,
+    Flags, then Choices, Audit, Meta.
 
-Cross-document consistency (same module)
-  Every parsed GSTIN / PAN / name is checked against the GST certificate's
-  (the anchor -- every vendor has one and its GSTIN embeds the PAN). A
-  wrong-folder file, a stale certificate or an OCR garble that still looks
-  like a valid number each become one warning naming the file and the two
-  values. An individual's PAN (4th letter P) filed as the entity's is
-  called out as "likely an owner's card"; an owner's card whose name is
-  not among the partners on record asks whose it is. Runs after the API
-  phase so the partner list is known. Names agree on two shared words or
-  a 0.8 character ratio -- one shared word ("PARTNER") is not agreement.
+Report header (vdd/report/render.py location())
+  Every report read "Town, <State>": the city label was derived by a
+  comma-split heuristic that also split on '/', so on the GST certificate's
+  labelled address the fragment 'Town' (from 'City/Town/Village') landed
+  as the city. Labelled fields (City/Town/Village, City, Village/Town,
+  District, State) are now read directly, with the district standing in
+  when there is no city label; the heuristic remains for unlabelled
+  free-text addresses. Sri Laxmi Steel: "Hyderabad, Telangana"; B R
+  Trading Co: "Belurmath, West Bengal".
 
-Formats and the reason a file could not be read (vdd/extract/ocr.py)
-  ExtractionResult.reason. Password-protected PDFs (DigiLocker Aadhaar,
-  bank statements) say so instead of reading as blank; .webp/.heic/.heif
-  are accepted (HEIC via pillow-heif, and the message says to install it
-  when it is missing); an unsupported type (.docx) is named; a PDF that
-  cannot be rasterised names the exception; OCR reads up to 6 pages of a
-  scanned document (was 2 -- a rental agreement's schedule page is on
-  page 4) and says when it stopped short; a photo OCR found nothing in
-  says so, including the case where the document is too small in the
-  frame (the selfie-holding-an-Aadhaar in the B R Trading folder). The
-  reason travels with the DocumentRead into the consistency warning, the
-  Documents sheet's last column (in place of the missing-fields list for
-  an unreadable file) and the webapp's verification panel. pillow-heif is
-  added to requirements.txt.
+LLM review: a note-only correction no longer wipes the value (vdd/review/graph.py)
+  A reviewer finding with action=correct, confidence=verified and
+  proposed_value=null -- "the wording contradicts the evidence, keep the
+  score" -- was applied as Resolved.ok(None): the parameter became
+  unresolved and lost its points (Skandan Plastrix, 18-Sep: com_gst_delay_days
+  8 days, 3/3 -> 0/3, score 43 -> 40). The value and score are now kept
+  and only the note is replaced (recorded as note_only); a null on an
+  unresolved parameter or on an entity field is escalated instead. The
+  schema tells the reviewer what null means.
 
-API cache expiry (vdd/finoscale_api/client.py)
-  Cached responses expire after cache_max_age_days (default 7; 0 = never)
-  and are refetched; if the refetch fails the stale answer is served but
-  counted, and the run carries "WARNING: N API response(s) came from an
-  EXPIRED cache because the live call failed -- registry facts in this
-  report may be out of date". run_vendor.py and finalise_report.py take
-  --cache-max-age DAYS and --fresh. A GSTIN cancelled last week no longer
-  reads Active from a months-old cache with nothing to say so.
+Electricity bill, Tamil Nadu (vdd/extract/parsers.py)
+  TANGEDCO's one label "Name/Address & GST of the Consumer" contains
+  "Address", so the generic Address regex matched it and took the rest of
+  the bill as the address; the TANGEDCO branch beneath it was dead. It now
+  runs first, and the generic regex no longer matches "Name/Address". The
+  Skandan bill yields its consumer name and street address again (the
+  ownership note reads "connection is in the entity's own name" instead of
+  "corroborated by: with a 47.0 KW sanctioned load").
 
-Premises numbers have kinds; a PIN alone is not an address (resolvers.py)
-  - Plot / survey / door numbers are compared kind against kind. 'Sy. No.
-    12/3' on the certificate and 'Door No. 12' on the bill is the same
-    premises on two registers: neither a match nor a discrepancy, and the
-    note now says "of different kinds ... cannot be compared" instead of
-    "could not be matched". Same-kind conflicts (plot 382 vs plot 384-385)
-    are unchanged. The Udyam-vs-GST note states incomparable kinds the
-    same way instead of raising a WARNING.
-  - A separator between two digits joins a compound number instead of
-    being deleted: 'Plot No. 384-385' was becoming '384385' -- six digits,
-    which the tokeniser then took for a PIN code -- and 'Sy. No. 12/3'
-    was becoming '123'. The compound stays whole ('384_385') and also
-    counts by its parts, so 'Plot 384-385' and 'Plot 385' still meet;
-    '135/11/A/2' still matches whole.
-  - Both PINs present and equal but nothing else in common (no premises
-    number, no locality word) now scores minor_discrepancy with "PIN
-    matches but nothing else does ... the bill's address text may not
-    have been read", not match. A PIN covers a post-office area; on its
-    own it usually means the bill's address line was unreadable. This is
-    the one scoring change; neither real folder hits it.
+Address tokens (vdd/resolve/resolvers.py)
+  "tamil", "uttar", "madhya", "andhra", "west", ... join the state-word stop
+  list: "tamil" alone was a locality match shared by every address in Tamil
+  Nadu. A slash between words now separates them, so "City/Town/Village"
+  and "Road/Street" (the certificate's own labels) dissolve into stop words
+  instead of junk tokens. Skandan Plastrix's electricity-bill parameter
+  stays unresolved (0/2): the bill is for the Kittampalayam factory, the
+  GST address is the Ramanathapuram office, and the PCB consent corroborates
+  the factory -- the old 44 had scored it "minor discrepancy" on a meter
+  reading (86149.5) mistaken for a PIN and "tamil" as a shared locality.
+  Skandan Plastrix deterministic: 43 (was 44 on ea9140b, for that reason).
 
-Tests: 160 (was 139) -- tests/test_consistency.py,
-tests/test_format_and_cache.py (encrypted PDF, HEIC without decoder,
-unsupported type, page cap, blank OCR, rasterise failure, reason in the
-warning; fresh / stale / never-expire / stale-served-offline cache),
-tests/test_address_kinds.py -- all new.
+Proof of Address: new bucket address_mismatch (config/scoring_model.json,
+resolvers.py) -- an addition to the scoring model, analyst request 18-Sep
+  addr_ownership_type gains "address_mismatch" -> 0 ("Premises proof is for
+  a different address than the GST registration"). When the electricity
+  bill resolves to a definite not_match, the rental agreement / bill on
+  file proves nothing about the GST-registered premises, so ownership is
+  0 instead of the 1 point "rented" carried (or 4 for an inferred "owned").
+  A sale deed still wins; a minor discrepancy or an inconclusive
+  comparison leaves the usual verdict. addr_rental_validation follows as
+  not_match (0); addr_landlord_declaration becomes undeterminable
+  (conditional, excluded). The bucket is in the workbook dropdown. The
+  electricity-bill resolver now runs before ownership in resolve_all.
 
-Both real folders re-run after all of the above: Sri Laxmi Steel 30/100
-and B R Trading Co 45/100, unchanged, every address note word-for-word
-the same; the only new lines are the read-quality / reason ones (the
-screenshot's "too small in the frame", BRT_pan.pdf's "PARTIAL READ --
-missing pan").
+Four parser gaps from the Skandan folder
+  - Cancelled cheque: "VALID FOR THREE MONTHS ONLY" was read as the account
+    holder; the FOR line above the signature wins and validity / payee
+    boilerplate is never a name. PRIVATE joins the suffix strip.
+  - Names: an initial stands for a word starting with that letter, so
+    "NAVIN K" is director "KANNUSAMY NAVIN"; dotted initials ("B.R.") are
+    two initials; an initial that is the only difference ("A PERSON" vs
+    "B PERSON") is a disagreement.
+  - Certificate of Incorporation is its own document type (filename and
+    content), parsed for name, CIN, PAN and the spelt-out date of
+    incorporation ("TWENTY NINETH day of NOVEMBER TWO THOUSAND TWENTY
+    THREE" -> 29/11/2023); the CIN it carries is preferred over any regex
+    hit elsewhere; PAN and incorporation date merge from it. It no longer
+    files as a PAN card.
+  - GST certificate: the registration date under "Date of Validity / From"
+    (the current REG-06 layout, where "Date of Liability" is blank) is read;
+    Skandan's 02/01/2024 no longer shows as N/A for the reviewer to keep
+    re-finding.
 
-Files: vdd/extract/consistency.py (new), vdd/extract/ocr.py,
-vdd/finoscale_api/client.py, vdd/resolve/resolvers.py, vdd/pipeline.py,
-vdd/review_sheet.py, webapp/app.py, run_vendor.py, finalise_report.py,
-requirements.txt; tests/test_consistency.py, tests/test_format_and_cache.py,
-tests/test_address_kinds.py.
+Scans with a token text layer (vdd/extract/ocr.py, pipeline.py)
+  A page that is mostly one image with under 300 characters of text is a
+  scan: Skandan's Factory License (62 characters of e-signature stamp over
+  a full-page image) read as digital and was never OCR'd; it is now, and
+  its premises address is cut at the PIN code, before the signatory block.
+  A scanned, filled-in form whose text layer is only the blank template's
+  labels (the KYC form) is re-read by OCR when the expected fields are
+  missing and the pages are image-dominated; the better parse is kept
+  (method "pymupdf_text+easyocr"). On Skandan's handwritten KYC form OCR
+  recovers nothing usable, so it stays POOR -- honestly.
 
-Known, deliberately not changed: the GST certificate's Annexure A
-(additional places of business) is not extracted; the trade-name parser
-strips "M/S " but not "M/S."; the token-overlap name match still treats
-two partners sharing a surname as the same name; GST-certificate field
-labels joined by '/' ("Road/Street") still collapse to one token.
+Evidence sub-lines were invisible in every PDF (vdd/report/build_context.py)
+  The annex's evidence/reason line under each row's verdict was styled
+  rgba(255,255,255,.42) -- white at 42%, a dark-panel style -- on the
+  white annex rows, so it has been unreadable in every report since the
+  first commit; the rows were merely taller. Noticed on B R Trading Co,
+  where AML-01's sub-line was 7,800 characters of blank. Now #6B7280 like
+  the other muted text: the audit trail the annex exists for is readable.
+
+Zigram findings deduplicated (vdd/aml/zigram_screening.py)
+  summarize_screen returned one line per matched row; a watchlist that is
+  republished monthly matches the same entity once per compilation file
+  (B R Trading Co: the Maharashtra GST non-genuine-dealer list 19 times,
+  each with its own source URL). One line per list + category + status
+  now, with the strongest score, a row count, the first source and a
+  count of the others ("-- 19 matching rows, source=... (+12 more source
+  file(s))"). Feeds the AML note, the review tool and the workbook alike.
+  B R Trading Co's AML section: 7,840 characters -> 1,328; the page 4,577
+  -> 3,382 px.
+
+Tests: 180 -- tests/test_report_location.py (new), four note-only cases in
+tests/test_review_corrections.py, a TANGEDCO bill, cheque holder, initials, COI and
+GST-date cases in tests/test_document_reading_regressions.py, scan detection
+and the OCR retry in tests/test_format_and_cache.py, the address_mismatch
+bucket in tests/test_resolver_branches.py, Zigram dedupe in
+tests/test_zigram_screening.py; tests/test_review_sheet.py gains a layout test (no frozen
+panes, hidden software columns, row height follows note length, analyst
+name read from the Review sheet); the summary-formula test now locates
+cells by column constant rather than letter.
+
+All three real folders regenerated after everything above: Sri Laxmi Steel
+30, B R Trading Co 45, Skandan Plastrix 43 (deterministic); one page each,
+footer on it, evidence lines readable.
+
+Files: config/scoring_model.json, requirements.txt, vdd/aml/zigram_screening.py,
+vdd/extract/classify.py, vdd/extract/consistency.py, vdd/extract/ocr.py,
+vdd/extract/parsers.py, vdd/pipeline.py, vdd/report/assets/template_head.html,
+vdd/report/build_context.py, vdd/report/render.py, vdd/resolve/resolvers.py,
+vdd/review/graph.py, vdd/review/schemas.py, vdd/review_sheet.py;
+tests/test_report_location.py (new), tests/test_document_reading_regressions.py,
+tests/test_format_and_cache.py, tests/test_resolver_branches.py,
+tests/test_review_corrections.py, tests/test_review_sheet.py,
+tests/test_zigram_screening.py.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>

@@ -8,11 +8,12 @@ import re
 
 import pytest
 from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
 
 from vdd.extract.classify import ClassifiedDocs
 from vdd.resolve.resolvers import Resolved
 from vdd.review_sheet import (
-    C_ANALYST, C_NOTE, C_PID, C_PREVIEW, S_DOCS, S_ENTITY, S_META, S_REVIEW, ReviewSheetError,
+    C_ANALYST, C_CODE, C_NAME, C_NOTE, C_PID, C_PREVIEW, S_DOCS, S_ENTITY, S_META, S_REVIEW, ReviewSheetError,
     _excel_condition, apply_review_sheet, param_specs, read_review_workbook, validate_review_sheet,
     write_review_workbook,
 )
@@ -91,7 +92,7 @@ def test_workbook_has_every_parameter_with_dropdown_and_preview(tmp_path):
     assert len(ws.data_validations.dataValidation) == len(pids)
     # a category param's dropdown lists its buckets plus 'unresolved'
     dv = next(d for d in ws.data_validations.dataValidation if "owned" in str(d.formula1))
-    assert '"owned,leased,rented,unresolved"' == dv.formula1
+    assert '"owned,leased,rented,address_mismatch,unresolved"' == dv.formula1
     # numeric params get a decimal rule and a nested-IF preview
     specs = param_specs(engine.model)
     assert specs["com_gst_delay_days"].numeric and specs["com_gst_vintage"].numeric
@@ -114,9 +115,9 @@ def test_summary_and_section_formulas_reference_the_table(tmp_path):
     path, _ = _write(tmp_path, engine, entity, resolved, docs)
     ws = load_workbook(path)[S_REVIEW]
     total_row = next(r for r in ws.iter_rows() if r[0].value == "TOTAL (/100)")
-    assert str(total_row[3].value).startswith("=SUM(D")
-    section = next(r for r in ws.iter_rows() if r[0].value == "COM" and r[2].value == "COMPLIANCE")
-    assert str(section[C_PREVIEW - 1].value).startswith("=SUM(L")
+    assert str(total_row[4].value).startswith("=SUM(E")          # summary: A:B section, C system, D max, E preview
+    section = next(r for r in ws.iter_rows() if r[C_CODE - 1].value == "COM" and r[C_NAME - 1].value == "COMPLIANCE")
+    assert str(section[C_PREVIEW - 1].value).startswith(f"=SUM({get_column_letter(C_PREVIEW)}")
 
 
 def test_only_analyst_cells_are_unlocked(tmp_path):
@@ -274,3 +275,40 @@ def test_audit_rows_carry_forward_into_the_next_workbook(tmp_path):
     path, _ = _write(tmp_path, engine, entity, resolved, docs, audit_rows=prior, analyst_name="A")
     sheet = read_review_workbook(path)
     assert sheet.audit_rows == prior and sheet.analyst_name == "A"
+
+
+# ---------------------------------------------------------------- layout (18-Sep: "clean, readable, no frozen panes")
+def test_workbook_layout_is_readable(tmp_path):
+    from vdd.review_sheet import ANALYST_CELL, C_EVIDENCE, C_HIDDEN, C_ORIG, C_SOURCE, S_FLAGS, read_review_workbook
+    engine, entity, resolved, docs = _vendor()
+    resolved["addr_ownership_type"] = Resolved.ok(
+        "owned", "doc:electricity_bill",
+        note="NO SALE DEED ON FILE -- ownership is inferred from the absence of any rental/lease agreement in the "
+             "document set, corroborated by: the industrial electricity connection is in the entity's own name; "
+             "the Udyam registration and the GST certificate name the same premises; no landlord is mentioned "
+             "anywhere in the folder. Confirm with a sale deed or property-tax receipt if available.")
+    path, _ = _write(tmp_path, engine, entity, resolved, docs)
+    wb = load_workbook(path)
+    # no frozen panes anywhere
+    assert all(ws.freeze_panes is None for ws in wb.worksheets)
+    # sheets in the order the analyst works through them
+    assert wb.sheetnames[:4] == [S_REVIEW, S_ENTITY, S_DOCS, S_FLAGS]
+    ws = wb[S_REVIEW]
+    # the software's columns are hidden, the analyst's are not
+    for c in C_HIDDEN:
+        assert ws.column_dimensions[get_column_letter(c)].hidden
+    for c in (C_NAME, C_EVIDENCE, C_ANALYST, C_NOTE):
+        assert not ws.column_dimensions[get_column_letter(c)].hidden
+    assert C_PID in C_HIDDEN and C_SOURCE in C_HIDDEN and C_ORIG in C_HIDDEN
+    # a long evidence note gets a row tall enough to read it; a short one does not
+    rows = [r for r in ws.iter_rows() if isinstance(r[C_PID - 1].value, str) and r[C_PID - 1].value in resolved]
+    longest = max(rows, key=lambda r: len(str(r[C_EVIDENCE - 1].value or "")))
+    shortest = min(rows, key=lambda r: len(str(r[C_EVIDENCE - 1].value or "")))
+    assert len(str(longest[C_EVIDENCE - 1].value)) > 100
+    assert ws.row_dimensions[longest[0].row].height >= 2 * 15
+    assert ws.row_dimensions[shortest[0].row].height < ws.row_dimensions[longest[0].row].height
+    # the analyst's name is read from the Review sheet, Meta stays as the fallback
+    ws[ANALYST_CELL].value = "R. Iyer"
+    wb.save(path)
+    assert read_review_workbook(path).analyst_name == "R. Iyer"
+    assert not ws[ANALYST_CELL].protection.locked

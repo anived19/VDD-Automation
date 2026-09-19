@@ -23,6 +23,11 @@ DOC_TYPE_PATTERNS: Dict[str, List[str]] = {
     # matched "B._R._Trading_Co._Udyam_Registration_Certificate.pdf".
     "msme_certificate": [r"(?<![a-z])msme(?![a-z])", r"(?<![a-z])udyam(?![a-z])"],
     "kyc_form": [r"\bkyc\b"],
+    # MCA Certificate of Incorporation -- the company's CIN, PAN and date of
+    # incorporation from the registrar itself. Ahead of pan_entity: the
+    # certificate prints "Permanent Account Number", which used to make the
+    # content fallback file it as a PAN card (Skandan Plastrix, 2026-09-18).
+    "certificate_of_incorporation": [r"certificate[\s_-]*of[\s_-]*incorporation", r"\bcoi\b", r"incorporation[\s_-]*cert"],
     # `elec\w*` absorbs the misspellings real folders arrive with ("electrity
     # bill", "electricty bill"); "power bill" / "current bill" / "EB bill" are
     # what the same document is called in everyday Indian English; the last
@@ -51,8 +56,9 @@ DOC_TYPE_PATTERNS: Dict[str, List[str]] = {
 
 DOC_TYPE_ORDER = [
     "gst_certificate", "gst_portal", "cancelled_cheque", "pan_owner", "pan_entity",
-    "msme_certificate", "kyc_form", "electricity_bill", "sale_deed", "landlord_declaration",
-    "rental_agreement", "aadhaar", "client_photo", "factory_license", "pcb_certificate", "trade_licence",
+    "msme_certificate", "certificate_of_incorporation", "kyc_form", "electricity_bill", "sale_deed",
+    "landlord_declaration", "rental_agreement", "aadhaar", "client_photo", "factory_license",
+    "pcb_certificate", "trade_licence",
 ]
 
 # ---------------------------------------------------------------- content-based fallback
@@ -80,6 +86,9 @@ CONTENT_SIGNATURES: List[tuple] = [
     ("cancelled_cheque", [("ifsc", r"a\s*/?\s*c\s*no"), ("ifs code", r"a\s*/?\s*c\s*no"),
                            "payable at par at all branches"]),
     ("aadhaar", ["unique identification authority", ("aadhaar", "government of india")]),
+    ("certificate_of_incorporation", ["certificate of incorporation",
+                                      ("corporate identity number", "registrar of companies"),
+                                      ("ministry of corporate affairs", r"\bcin\b")]),
     # OCR on a scanned card reads the header as "INCOMIZ TAX DEPARTMENI",
     # "GOYT. Of INDIA", "PErmanent Account Numiber" (2026-09-17, two real cards)
     # -- so the phrases are matched by their stable stems, and a well-formed

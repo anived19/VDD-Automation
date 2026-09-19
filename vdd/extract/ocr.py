@@ -99,6 +99,51 @@ def _manual_transcript(path: str, cache_dir: Optional[str]) -> Optional[str]:
     return None
 
 
+def _image_cover(page) -> float:
+    """Largest fraction of the page's area covered by one placed image."""
+    import pymupdf as fitz
+    area = page.rect.width * page.rect.height
+    if not area:
+        return 0.0
+    cover = 0.0
+    try:
+        for info in page.get_image_info():
+            r = fitz.Rect(info["bbox"]) & page.rect
+            cover = max(cover, (r.width * r.height) / area)
+    except Exception:
+        pass
+    return cover
+
+
+def _page_is_scan(page, text: str) -> bool:
+    """A scanned page can carry a token text layer -- the e-signature stamp
+    ("V S SARAVANAN / DIGITALLY SIGNED / 2026.04.28", 62 characters on
+    Skandan Plastrix's Factory License) or a form template's printed labels --
+    while everything that matters is pixels in one big image. Text under 30
+    characters, or a page that is mostly one image with under 300 characters
+    of text, is treated as a scan and OCR'd."""
+    nonws = len(re.sub(r'\s+', '', text))
+    if nonws < 30:
+        return True
+    return nonws < 300 and _image_cover(page) >= 0.5
+
+
+def pdf_image_dominated(path: str, min_cover: float = 0.9) -> bool:
+    """True when some page of the PDF is essentially one full-page image --
+    a scanned, filled-in form whose text layer is only the blank template's
+    labels reads as digital, yet its values are in the image."""
+    if not _is_pdf(path):
+        return False
+    try:
+        import pymupdf as fitz
+        with fitz.open(path) as doc:
+            if doc.needs_pass:
+                return False
+            return any(_image_cover(page) >= min_cover for page in doc)
+    except Exception:
+        return False
+
+
 def _pdf_text_layer(path: str) -> Optional[str]:
     import pymupdf as fitz
     with fitz.open(path) as doc:
@@ -111,6 +156,8 @@ def _pdf_text_layer(path: str) -> Optional[str]:
         for page in doc:
             t = page.get_text()
             parts.append(t)
+            if _page_is_scan(page, t):
+                digital_enough = False
             # len(t.strip()) only trims the ends -- a page that's a mostly-blank
             # template with the real content rendered as a scanned/stamped image
             # (confirmed on Skandan's Factory License + PCB Air/Water certs,
@@ -119,8 +166,7 @@ def _pdf_text_layer(path: str) -> Optional[str]:
             # clear a raw-length threshold on whitespace alone. Count actual
             # non-whitespace characters instead, so this doesn't silently accept
             # a page whose substantive content was never really extracted.
-            if len(re.sub(r'\s+', '', t)) < 30:
-                digital_enough = False
+            # (That rule, and the image-cover one, live in _page_is_scan.)
         text = "\n".join(parts)
         return text if digital_enough and text.strip() else None
 
@@ -358,11 +404,13 @@ def detect_diagonal_strike(path: str, rotation: int = 0) -> Optional[bool]:
 OCR_MAX_PAGES = 6
 
 
-def extract_text(path: str, cache_dir: Optional[str] = None) -> ExtractionResult:
+def extract_text(path: str, cache_dir: Optional[str] = None, force_ocr: bool = False) -> ExtractionResult:
+    """`force_ocr` skips the PDF text layer -- used for a second read of a
+    scanned form whose text layer turned out to be only the template."""
     reason = ""
     try:
         if _is_pdf(path):
-            text = _pdf_text_layer(path)
+            text = None if force_ocr else _pdf_text_layer(path)
             if text:
                 return ExtractionResult(text=text, method="pymupdf_text", confident=True)
             try:

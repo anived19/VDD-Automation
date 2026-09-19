@@ -509,10 +509,25 @@ def _bill_consumer_matches_entity(entity: dict) -> Optional[bool]:
 
 
 def resolve_addr_ownership_type(has_rental_doc: bool, has_electricity_doc: bool,
-                                 has_sale_deed: bool = False, entity: dict = None) -> Resolved:
+                                 has_sale_deed: bool = False, entity: dict = None,
+                                 electricity: Optional[Resolved] = None) -> Resolved:
     entity = entity or {}
     if has_sale_deed:
         return Resolved.ok("owned", "doc:sale_deed present", note="Ownership confirmed by sale deed on file")
+    # The premises whose status this parameter scores are the GST-registered
+    # ones. When the only premises proof on file -- the bill, and the tenancy
+    # it implies -- is for a definitely different address, it says nothing
+    # about them: 0, not the 1 point "rented" carried (analyst request,
+    # 2026-09-18; the bucket is an addition to the scoring model).
+    if electricity is not None and not electricity.unresolved and electricity.value == "not_match":
+        what = "rental/lease agreement" if has_rental_doc else "electricity bill"
+        return Resolved.ok("address_mismatch",
+                           f"doc:{'rental_agreement' if has_rental_doc else 'electricity_bill'} present, but "
+                           "addr_electricity_bill=not_match",
+                           note=f"The {what} on file is for premises at a different address from the GST "
+                                "registration (see the electricity-bill row), so it does not establish the "
+                                "ownership status of the registered premises. Obtain the bill and the sale "
+                                "deed / rental agreement for the GST-registered address.")
     if has_rental_doc:
         return Resolved.ok("rented", "doc:rental_agreement present",
                             note="Cannot distinguish 'rented' vs 'leased' from document presence alone")
@@ -568,6 +583,9 @@ def resolve_addr_rental_validation(ownership: Resolved, electricity: Resolved) -
     if not ownership.unresolved and ownership.value in ("rented", "leased") \
             and not electricity.unresolved and electricity.value == "match":
         return Resolved.ok("rented_matching", "addr_ownership_type + addr_electricity_bill")
+    if not ownership.unresolved and ownership.value == "address_mismatch":
+        return Resolved.ok("not_match", "derived from addr_ownership_type=address_mismatch",
+                           note="The premises proof on file is for a different address than the GST registration.")
     return Resolved.missing(
         "Ownership type unresolved, or rented without a confirmed matching electricity-bill address")
 
@@ -586,6 +604,9 @@ def resolve_addr_landlord_declaration(ownership: Resolved, has_landlord_doc: boo
                             note="N/A -- not applicable. The premises are owned/occupied by the business "
                                  "itself, so there is no landlord and no owner NOC to obtain "
                                  "(ScoringModel.json: CONDITIONAL -- omit for owned premises).")
+    if not ownership.unresolved and ownership.value == "address_mismatch":
+        return Resolved.missing("The premises proof on file is for a different address, so whether a landlord "
+                                "NOC applies to the GST-registered premises cannot be determined.")
     if not ownership.unresolved and ownership.value in ("rented", "leased"):
         # A genuine documentation gap, not an N/A -- rented premises are expected
         # to have the landlord's NOC for commercial use at the registered address.
@@ -621,6 +642,9 @@ _ADDR_STATE_WORDS = {s.lower() for s in (
     "delhi", "telangana", "assam", "goa", "bihar", "jharkhand", "odisha", "sikkim",
     "tripura", "mizoram", "manipur", "nagaland", "meghalaya", "uttarakhand",
     "chandigarh", "puducherry", "pradesh", "bengal", "nadu", "kashmir", "chhattisgarh",
+    # the first halves of two-word states -- "tamil" alone was scoring as a
+    # locality shared by every address in Tamil Nadu (Skandan Plastrix, 2026-09-18)
+    "tamil", "tamilnadu", "uttar", "madhya", "himachal", "arunachal", "andhra", "jammu", "west",
 )}
 
 
@@ -635,6 +659,10 @@ def _norm_addr(s: str) -> str:
     tokeniser then took for a PIN code -- and 'Sy. No. 12/3' into '123'."""
     s = (s or "").lower().translate(_DEVANAGARI_DIGITS)
     s = re.sub(r'(?<=\d)[.\-/\\](?=\d)', '_', s)
+    # A slash between two words separates them ("City/Town/Village",
+    # "Road/Street" -- the certificate's own field labels), so each half can be
+    # recognised as a stop word instead of forming a junk token.
+    s = re.sub(r'(?<=[a-z])\.?\s*/\s*(?=[a-z])', ' ', s)
     s = re.sub(r'[.\-/\\]', '', s)
     return re.sub(r'[^a-z0-9_]+', ' ', s).strip('_ ')
 
@@ -1359,9 +1387,6 @@ def resolve_all(entity: dict, docs, api: ApiBundle) -> dict:
     docs: a vdd.extract.classify.ClassifiedDocs for presence checks.
     Returns {parameterId: Resolved} covering all 24 No-Consent parameters."""
     gstin_active_resolved = resolve_com_gstin_active(api)
-    ownership_resolved = resolve_addr_ownership_type(
-        docs.has("rental_agreement"), docs.has("electricity_bill"),
-        has_sale_deed=docs.has("sale_deed"), entity=entity)
     electricity_resolved = resolve_addr_electricity_bill(
         entity.get("address"), entity.get("electricity_bill_address"), entity.get("electricity_bill_pincode"),
         bill_village=entity.get("electricity_bill_village"),
@@ -1369,6 +1394,9 @@ def resolve_all(entity: dict, docs, api: ApiBundle) -> dict:
         entity_name=entity.get("legal_name") or entity.get("trade_name"),
         factory_license_address=entity.get("factory_premises_address"),
         pcb_address=entity.get("pcb_premises_address"))
+    ownership_resolved = resolve_addr_ownership_type(
+        docs.has("rental_agreement"), docs.has("electricity_bill"),
+        has_sale_deed=docs.has("sale_deed"), entity=entity, electricity=electricity_resolved)
 
     rental_validation_resolved = resolve_addr_rental_validation(ownership_resolved, electricity_resolved)
 

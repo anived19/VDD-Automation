@@ -77,13 +77,15 @@ def parse_gst_certificate(text: str) -> dict:
                   text, re.S)
     if m:
         out["address"] = re.sub(r'\s+', ' ', m.group(1)).strip()
-    m = re.search(r'Date of Liability\s*\n\s*(\d{2}/\d{2}/\d{4})', text)
+    # Three layouts of the same REG-06 field: "Date of Liability" with the
+    # date under it; older forms with "Period of Validity / From"; and the
+    # current form where "Date of Liability" is blank and the date sits under
+    # "Date of Validity / From" (Skandan Plastrix, 2026-09-18 -- it read as
+    # N/A and the reviewer kept re-finding it from the live GSTIN fetch).
+    m = (re.search(r'Date of Liability\s*\n\s*(\d{2}/\d{2}/\d{4})', text)
+         or re.search(r'(?:Period|Date) of Validity\s*\n\s*From\s*\n\s*(\d{2}/\d{2}/\d{4})', text))
     if m:
         out["date_of_registration"] = m.group(1)
-    else:
-        m = re.search(r'Period of Validity\s*\n\s*From\s*\n\s*(\d{2}/\d{2}/\d{4})', text)
-        if m:
-            out["date_of_registration"] = m.group(1)
     m = re.search(r'Type of Registration\s*\n\s*(\w+)', text)
     if m:
         out["taxpayer_type"] = m.group(1).strip()
@@ -207,9 +209,19 @@ def parse_cancelled_cheque(text: str) -> dict:
                       if n != (out.get("ifsc") or "") and len(n) != 6]
         if candidates:
             out["account_number"] = max(candidates, key=len)
-    m = re.search(r'FOR\s+([A-Z][A-Za-z .&]+)', text)
-    if m:
-        holder = re.sub(r'\b(PROPRIETOR|DIRECTOR|PVT\.?|LTD\.?|LIMITED)\b', '', m.group(1), flags=re.I).strip()
+    # The account holder is the "FOR <NAME>" line above the signature. "VALID
+    # FOR THREE MONTHS ONLY" is printed on every leaf and used to win (Skandan
+    # Plastrix, 2026-09-18): a line-start FOR is preferred and the validity /
+    # payee boilerplate is never a name.
+    holders = []
+    for m in re.finditer(r'(?m)(^|\S\s+)FOR\s+([A-Z][A-Za-z .&]+)', text):
+        cand = m.group(2).strip()
+        if re.search(r'\b(MONTHS?|ONLY|VALID|PAYEE|ORDER|BEARER|SELF)\b', cand, re.I):
+            continue
+        holders.append((m.group(1) == "", cand))
+    if holders:
+        holders.sort(key=lambda h: (not h[0], -len(h[1])))
+        holder = re.sub(r'\b(PROPRIETOR|DIRECTOR|PRIVATE|PVT\.?|LTD\.?|LIMITED)\b', '', holders[0][1], flags=re.I).strip()
         out["account_holder"] = holder
     # Custom Instructions rule 2: a file named "Cancelled Cheque" isn't valid proof
     # unless it actually shows a diagonal strike-through / handwritten "cancelled"
@@ -234,28 +246,31 @@ def parse_electricity_bill(text: str) -> dict:
     label vocabulary hardcoded.
     """
     out = {}
-    m = re.search(r'(?:Consumer Name|ग्राहकाचे नाव|उपभोक्ता का नाम|ಗ್ರಾಹಕರ ಹೆಸರು|వినియోగదారు పేరు|நுகர்வோர் பெயர்)\s*[:\-]?\s*(.+)', text, re.I)
+    # TANGEDCO (Tamil Nadu) first: its one label "Name/Address & GST of the
+    # Consumer" contains the word "Address", so the generic Address regex
+    # below used to match it and swallow the rest of the bill as the address
+    # -- this branch never ran and the bill lost its consumer name (Skandan
+    # Plastrix, seen again 2026-09-18).
+    m = re.search(r'Name\s*/\s*Address\s*&?\s*GST of the Consumer\s*\n\s*(.+?)\n\s*(.+?)\n\s*State\s*[:\-]',
+                  text, re.S)
     if m:
+        out["consumer_name"] = m.group(1).strip()
+        out["address"] = re.sub(r'\s+', ' ', m.group(2)).strip()
+    m = re.search(r'(?:Consumer Name|ग्राहकाचे नाव|उपभोक्ता का नाम|ಗ್ರಾಹಕರ ಹೆಸರು|వినియోగదారు పేరు|நுகர்வோர் பெயர்)\s*[:\-]?\s*(.+)', text, re.I)
+    if m and "consumer_name" not in out:
         out["consumer_name"] = m.group(1).strip()
     # The address ends at the next label. The second alternation group is the
     # Telangana/AP DISCOM (TSSPDCL/APSPDCL) layout, whose bill continues straight
     # into "Section Name / Your Arrears as on / Current Month Bill / ..." -- without
     # these terminators the whole rest of the bill (dates, amounts) was captured
     # as the address (seen 2026-09-17, Sri Laxmi Steel).
-    m = re.search(r'(?:Address|पत्ता|पता|ವಿಳಾಸ|చిరునామా|முகவரி)\s*[:\-]?\s*\n?\s*(.+?)'
+    m = re.search(r'(?<![/&\w])(?:Address|पत्ता|पता|ವಿಳಾಸ|చిరునామా|முகவரி)\s*[:\-]?\s*\n?\s*(.+?)'
                   r'(?:\n\s*(?:Village|Pin Code|Category|गाव|पिन कोड|प्रवर्ग|गांव|ಗ್ರಾಮ|ವರ್ಗ|వర్గం|வகை'
                   r'|Section Name|Your Arrears|Current Month Bill|Total Amount|Due Date|Bill Date|Bill Period'
                   r'|Meter|Consumer No|Service No|Unique Service|ERO\b|Tariff|Units)|\Z)', text, re.S | re.I)
-    if m:
+    if m and "address" not in out:
         addr_lines = [l.strip() for l in m.group(1).splitlines() if l.strip()]
         out["address"] = ", ".join(addr_lines)
-
-    if "consumer_name" not in out and "address" not in out:
-        m = re.search(r'Name/Address\s*&?\s*GST of the Consumer\s*\n\s*(.+?)\n\s*(.+?)\n\s*State\s*[:\-]',
-                       text, re.S)
-        if m:
-            out["consumer_name"] = m.group(1).strip()
-            out["address"] = re.sub(r'\s+', ' ', m.group(2)).strip()
 
     if "consumer_name" not in out and "address" not in out:
         # Unlabelled consumer block (CESC / Kolkata bills, 2026-09-17, B R Trading
@@ -455,7 +470,15 @@ def parse_factory_license(text: str) -> dict:
         out["registration_number"] = m.group(1).strip()
     m = re.search(r'Description of Licensed Premises\s*(.+)', text, re.S)
     if m:
-        out["premises_address"] = re.sub(r'\s+', ' ', m.group(1)).strip()[:400]
+        addr = re.sub(r'\s+', ' ', m.group(1)).strip()
+        # The address ends at its PIN code; what follows on the OCR'd licence
+        # is the signatory block ("VS SARAVANAN DIGITALLY SIGNED ... Joint
+        # Director ...") and the office's own address.
+        end = re.search(r'\b\d{3}\s?\d{3}\b', addr)
+        if end:
+            addr = addr[:end.end()]
+        addr = re.split(r'(?i)\b(?:digitally signed|joint director|deputy director|signature)\b', addr)[0]
+        out["premises_address"] = addr.strip()[:400]
     return out
 
 
@@ -474,8 +497,76 @@ def parse_pcb_certificate(text: str) -> dict:
     return out
 
 
+_ORDINAL_WORDS = {
+    "first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5, "sixth": 6, "seventh": 7, "eighth": 8,
+    "ninth": 9, "nineth": 9, "tenth": 10, "eleventh": 11, "twelfth": 12, "thirteenth": 13, "fourteenth": 14,
+    "fifteenth": 15, "sixteenth": 16, "seventeenth": 17, "eighteenth": 18, "nineteenth": 19, "twentieth": 20,
+    "twenty": 20, "thirtieth": 30, "thirty": 30,
+}
+_NUMBER_WORDS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9,
+    "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
+    "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
+    "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90, "hundred": 100, "thousand": 1000,
+}
+_MONTHS = {m: i for i, m in enumerate(("january", "february", "march", "april", "may", "june", "july",
+                                       "august", "september", "october", "november", "december"), start=1)}
+
+
+def _words_to_int(words: list) -> int:
+    total, current = 0, 0
+    for w in words:
+        n = _NUMBER_WORDS.get(w)
+        if n is None:
+            continue
+        if n == 100:
+            current = (current or 1) * 100
+        elif n == 1000:
+            total += (current or 1) * 1000
+            current = 0
+        else:
+            current += n
+    return total + current
+
+
+def _spelt_date(text: str) -> Optional[str]:
+    """'TWENTY NINETH day of NOVEMBER TWO THOUSAND TWENTY THREE' -> '29/11/2023'
+    (the MCA certificate spells its dates out; a misspelt ordinal is common)."""
+    m = re.search(r'([A-Za-z]+(?:[\s-]+[A-Za-z]+)?)\s+day\s+of\s+([A-Za-z]+)\s+((?:[A-Za-z]+\s+){1,6}[A-Za-z]+)',
+                  text, re.I)
+    if not m:
+        return None
+    day = sum(_ORDINAL_WORDS.get(w, _NUMBER_WORDS.get(w, 0)) for w in re.split(r'[\s-]+', m.group(1).lower()))
+    month = _MONTHS.get(m.group(2).lower())
+    year = _words_to_int(m.group(3).lower().split())
+    if not (1 <= day <= 31 and month and 1900 <= year <= 2100):
+        return None
+    return f"{day:02d}/{month:02d}/{year}"
+
+
+def parse_certificate_of_incorporation(text: str) -> dict:
+    """MCA Certificate of Incorporation: company name, CIN, PAN, date of
+    incorporation. The registrar's own statement of all four."""
+    out = {}
+    m = re.search(r'certify that\s+(.+?)\s+is incorporated on', text, re.S | re.I)
+    if m:
+        out["name"] = re.sub(r'\s+', ' ', m.group(1)).strip()
+    m = re.search(r'\b([LU]\d{5}[A-Z]{2}\d{4}[A-Z]{3}\d{6})\b', text)
+    if m:
+        out["cin"] = m.group(1)
+    m = re.search(r'Permanent Account Number.*?\b([A-Z]{5}\d{4}[A-Z])\b', text, re.S | re.I)
+    if m:
+        out["pan"] = m.group(1)
+    m = re.search(r'incorporated on this\s+(.+?)\s+under the', text, re.S | re.I)
+    date = _spelt_date(m.group(1)) if m else None
+    if date:
+        out["date_of_incorporation"] = date
+    return out
+
+
 PARSERS = {
     "gst_certificate": parse_gst_certificate,
+    "certificate_of_incorporation": parse_certificate_of_incorporation,
     "msme_certificate": parse_msme_certificate,
     "cancelled_cheque": parse_cancelled_cheque,
     "gst_portal": parse_gst_portal_screenshot,
