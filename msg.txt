@@ -166,5 +166,3 @@ tests/test_report_location.py (new), tests/test_document_reading_regressions.py,
 tests/test_format_and_cache.py, tests/test_resolver_branches.py,
 tests/test_review_corrections.py, tests/test_review_sheet.py,
 tests/test_zigram_screening.py.
-
-Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
