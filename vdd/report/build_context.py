@@ -33,7 +33,7 @@ REPORT_ENTITY_FIELDS = (
     "date_of_registration", "declared_hsn", "electricity_bill_activity", "enterprise_type",
     "gst_annual_aggregate_turnover", "gst_annual_aggregate_turnover_year",
     "gst_nature_of_business_activity", "gstin", "legal_name", "major_activity",
-    "nature_of_business", "nic_5_code", "nic_5_description", "pan", "partners", "state",
+    "nature_of_business", "nic_5_code", "nic_5_description", "pan", "state",
     "taxpayer_type", "trade_name", "udyam_number",
 )
 
@@ -44,12 +44,6 @@ _ENTITY_TYPE_LABEL = {
 }
 
 
-# The annex rows sit on a white background; this was rgba(255,255,255,.42)
-# -- white at 42%, a dark-panel style -- so every evidence sub-line in every
-# report since the first commit was invisible in the PDF (noticed 2026-09-19
-# on B R Trading Co, whose AML-01 sub-line was 7,800 characters of blank).
-_EVIDENCE_STYLE = ("display:block;margin-top:3px;font-size:9.5px;line-height:1.45;"
-                    "color:#6B7280;font-weight:400")
 
 
 def _headline(note: str) -> str:
@@ -85,8 +79,11 @@ def _code_rows(cat: CategoryScore) -> list:
         else:
             result = esc(p.matched_condition or str(p.value))
             detail = p.note or ""
-        if detail:
-            result += f'<span style="{_EVIDENCE_STYLE}">{esc(detail)}</span>'
+        # The delivered annex shows the option that was selected and nothing
+        # more (analyst request 2026-09-19, matching their own reports); the
+        # reasoning lives in the workbook's Evidence column and in the
+        # reviewer's "Resolved parameter values" section.
+        del detail
         rows.append((code, esc(p.parameter_name), result))
     return rows
 
@@ -194,16 +191,13 @@ def _findings(result: ScoreResult, entity: dict = None) -> list:
 
     aml_resolved = [p for p in aml.params if not p.unresolved]
     aml_missing = [p for p in aml.params if p.unresolved]
-    # See _chips()'s identical check -- a Zigram hit outside the 5 scored AML
-    # parameters (e.g. an ESIC Defaulters List match) never lowers any
-    # parameter's score, but "clean" language must not be shown over it.
-    aml_other_finding = any("ADDITIONAL ZIGRAM FINDING" in (p.note or "") for p in aml.params)
-    if aml_other_finding:
-        other_note = next(p.note for p in aml.params if "ADDITIONAL ZIGRAM FINDING" in (p.note or ""))
-        extra = other_note.split("ADDITIONAL ZIGRAM FINDING", 1)[1].split(":", 1)[-1].strip(" .:")
-        out.append(("n", f"Zigram screening found an adverse record outside this report's 5 scored "
-                          f"AML parameters &mdash; NOT reflected in the AML score above: {esc(extra[:280])}"))
-    if aml_resolved and not aml_missing and not aml_other_finding \
+    # A Zigram hit on a list outside the sanctions/PEP/defaulter/court/DRT
+    # slots is scored on AML-01 (adverse_watchlist, 0) and named here.
+    watch = _param(aml, "legal_sanctions")
+    if watch is not None and not watch.unresolved and watch.value == "adverse_watchlist":
+        hit = (watch.note or "").split("--", 1)[-1].split(":", 1)[-1].split(" | ")[0].strip(" .:")
+        out.append(("n", f"Watchlist hit scored on AML-01 (confirm or dismiss): {esc(hit[:280])}"))
+    if aml_resolved and not aml_missing \
             and all(p.assigned_score >= p.max_score for p in aml_resolved if p.max_score):
         out.append(("c", "Clean Legal/AML &mdash; no sanctions, PEP, wilful-defaulter, eCourt or DRT/SARFAESI "
                           f"records ({int(aml.earned)}/{int(aml.max_score) if aml.max_score else 5})"))
@@ -244,6 +238,29 @@ def _vintage_phrase(from_date: str, as_of: date = None) -> Optional[str]:
     if m or not y:
         parts.append(f"{m} month{'s' if m != 1 else ''}")
     return "~" + " ".join(parts)
+
+
+_ADDRESS_LABEL = re.compile(
+    r'(?:Floor No\.?|Building No\.?\s*/\s*Flat No\.?|Name Of Premises\s*/\s*Building|Road\s*/\s*Street(?:\s*/\s*Lane)?|'
+    r'Locality\s*/\s*Sub Locality|City\s*/\s*Town\s*/\s*Village|Village\s*/\s*Town|Flat\s*/\s*Door\s*/\s*Block No\.?|'
+    r'Block|District|City|State|PIN Code|Pin)\s*:\s*', re.I)
+
+
+def _display_address(addr: Optional[str]) -> str:
+    """'Building No./Flat No.: 135/11/A/2 Road/Street: GIRISH GHOSH ROAD City/Town/Village: BELURMATH
+    District: Howrah State: West Bengal PIN Code: 711202' -> '135/11/A/2, GIRISH GHOSH ROAD, BELURMATH,
+    Howrah, West Bengal, 711202'. An address with no labels is returned as is."""
+    if not addr:
+        return ""
+    if not _ADDRESS_LABEL.search(addr):
+        return addr
+    parts = [p.strip(" ,-") for p in _ADDRESS_LABEL.split(addr)]
+    parts = [p for p in parts if p and p not in ("-", "NA", "N/A")]
+    out = []
+    for p in parts:
+        if not out or out[-1].lower() != p.lower():
+            out.append(p)
+    return ", ".join(out)
 
 
 def _nature_of_business(entity: dict) -> str:
@@ -330,13 +347,9 @@ def _chips(entity: dict, result: ScoreResult, loc: str, seller_type: str) -> lis
 
     aml_missing = [p for p in aml.params if p.unresolved]
     aml_hits = [p for p in aml.params if not p.unresolved and p.max_score and p.assigned_score < p.max_score]
-    # A Zigram hit outside this pipeline's 5 scored AML parameters (e.g. an ESIC
-    # Defaulters List match -- real, government-sourced, but not a sanctions/PEP/
-    # wilful-defaulter/eCourts/DRT hit specifically) never lowers any parameter's
-    # score (see resolve_aml()), but a "Cleared" badge must never be shown over a
-    # known real adverse finding just because it doesn't fit one of those 5 slots.
-    aml_other_finding = any("ADDITIONAL ZIGRAM FINDING" in (p.note or "") for p in aml.params)
-    if aml_hits or aml_other_finding:
+    # The chip follows the scored AML rows only, so it can never contradict
+    # the AML score: a watchlist hit is scored on AML-01 (see resolve_aml).
+    if aml_hits:
         chips.append(("amber", "! AML Adverse Finding"))
     elif aml_missing:
         chips.append(("amber", f"AML Partially Screened ({len(aml.params) - len(aml_missing)}/{len(aml.params)})"))
@@ -396,7 +409,7 @@ def build_context(entity: dict, result: ScoreResult, report_date: str = None) ->
     loc = _location(addr) if addr else (entity.get("state") or "N/A")
 
     seller_param = _param(poi, "ident_seller_type")
-    seller_type = (seller_param.value.capitalize() if seller_param and not seller_param.unresolved else "Trader")
+    seller_type = (seller_param.value.capitalize() if seller_param and not seller_param.unresolved else "Unclassified")
 
     nature = _nature_of_business(entity)
 
@@ -409,15 +422,14 @@ def build_context(entity: dict, result: ScoreResult, report_date: str = None) ->
     bank_verified_ok = (None if (bank_param is None or bank_param.unresolved)
                          else bank_param.assigned_score > 0)
 
+    # The same seven rows as the analysts' own reports: no Udyam formation
+    # date, no partners list (2026-09-19). The address is printed as an
+    # address, not as the certificate's labelled fields.
     entity_rows = [
         ("Legal Name", esc(legal)), ("Trade Name", esc(trade)), ("Entity Type", esc(entity_type)),
         ("Year Incorporated", esc(year_incorp or "N/A")), ("Business Vintage", esc(vintage_text)),
-        ("Location", esc(addr or loc)), ("Nature of Business", esc(nature)),
+        ("Location", esc(_display_address(addr) or loc)), ("Nature of Business", esc(nature)),
     ]
-    if entity.get("date_of_incorporation") and entity["date_of_incorporation"] != entity.get("date_of_registration"):
-        entity_rows.append(("Formation Date (Udyam)", esc(entity["date_of_incorporation"])))
-    if entity.get("partners"):
-        entity_rows.append(("Partners / Signatories", esc(", ".join(entity["partners"]))))
     reg_rows = [
         ("PAN Number", esc(entity.get("pan", "Not Available")), "m"),
         ("GSTIN", esc(entity.get("gstin", "Not Available")), "m"),
