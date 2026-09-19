@@ -250,3 +250,27 @@ def test_hsn_unmapped_chapter_is_unresolved_not_asserted():
 def test_hsn_none_on_record_is_not_available():
     api = ApiBundle(ongrid_detailed={"gstin_data": {"hsn_data": {}}})
     assert resolve_com_hsn_match(api, {"nic_5_description": "plastics"}).value == "not_available"
+
+
+# ---------------------------------------------------------------- address_mismatch (added to the model 18-Sep)
+def test_premises_proof_for_a_different_address_scores_zero_not_rented():
+    """A rental agreement (or bill) for premises other than the GST-registered
+    address proves nothing about those premises: 0, not the 1 point 'rented'
+    carried. Only a definite not_match triggers it -- a minor discrepancy or an
+    inconclusive comparison leaves the usual verdict."""
+    from vdd.resolve.resolvers import (Resolved, resolve_addr_landlord_declaration, resolve_addr_ownership_type,
+                                       resolve_addr_rental_validation)
+    from vdd.score.engine import ScoringEngine
+    not_match = Resolved.ok("not_match", "bill vs gst")
+    own = resolve_addr_ownership_type(True, True, entity={}, electricity=not_match)
+    assert own.value == "address_mismatch" and "different address" in own.note
+    assert resolve_addr_rental_validation(own, not_match).value == "not_match"
+    assert resolve_addr_landlord_declaration(own).unresolved
+    engine = ScoringEngine("config/scoring_model.json")
+    scored = {p.parameter_id: p for c in engine.score_no_consent({"addr_ownership_type": own}).categories for p in c.params}
+    assert scored["addr_ownership_type"].assigned_score == 0 and not scored["addr_ownership_type"].unresolved
+    # a sale deed is explicit ownership evidence and still wins
+    assert resolve_addr_ownership_type(False, True, has_sale_deed=True, entity={}, electricity=not_match).value == "owned"
+    # anything short of a definite mismatch is unchanged
+    assert resolve_addr_ownership_type(True, True, entity={}, electricity=Resolved.ok("minor_discrepancy", "x")).value == "rented"
+    assert resolve_addr_ownership_type(False, True, entity={}, electricity=Resolved.missing("could not compare")).value == "owned"

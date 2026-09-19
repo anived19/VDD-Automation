@@ -194,6 +194,11 @@ def summarize_screen(response: Optional[dict], entity_label: str) -> dict[str, A
         out["_error"] = response["_error"]
         return out
     out["_comprehensive"] = is_comprehensive(response)
+    # One line per (list, category, status), not per row: a watchlist that is
+    # republished monthly returns the same entity once per compilation file
+    # (B R Trading Co, 2026-09-19: the Maharashtra GST non-genuine-dealer list
+    # 19 times, each with its own source URL -- 7,800 characters in the note).
+    groups: dict = {}
     for category, row in _iter_hit_rows(response):
         # _iter_hit_rows already gates every category (including "Angola
         # Watchlists", present on every response regardless of
@@ -201,9 +206,31 @@ def summarize_screen(response: Optional[dict], entity_label: str) -> dict[str, A
         # real match, not a placeholder -- no further filtering needed.
         pid = classify_hit(category, row)
         list_name = row.get("ListName") or row.get("List Type") or category
+        status = row.get("match_status", row.get("FinalStatus", "?"))
+        score = row.get("fuzzy_score", row.get("FinalScore", "?"))
+        key = (pid, list_name, category, status)
+        g = groups.setdefault(key, {"scores": [], "sources": []})
+        g["scores"].append(str(score))
+        if row.get("SourceLink") and row["SourceLink"] not in g["sources"]:
+            g["sources"].append(row["SourceLink"])
+    for (pid, list_name, category, status), g in groups.items():
+        n = len(g["scores"])
+        score = max(g["scores"], key=_score_value) if n else "?"
         summary = (f"{entity_label}: matched '{list_name}' (category: {category}), "
-                    f"fuzzy_score={row.get('fuzzy_score', row.get('FinalScore', '?'))}, "
-                    f"status={row.get('match_status', row.get('FinalStatus', '?'))}"
-                    + (f", source={row.get('SourceLink')}" if row.get('SourceLink') else ""))
+                   f"fuzzy_score={score}, status={status}")
+        if n > 1:
+            summary += f" -- {n} matching rows"
+        if g["sources"]:
+            summary += f", source={g['sources'][0]}"
+            if len(g["sources"]) > 1:
+                summary += f" (+{len(g['sources']) - 1} more source file(s))"
         out.setdefault(pid, []).append(summary)
     return out
+
+
+def _score_value(s: str) -> float:
+    """'100%' -> 100.0, '87' -> 87.0, '?' -> -1: for picking the strongest score."""
+    try:
+        return float(str(s).rstrip("%"))
+    except ValueError:
+        return -1.0

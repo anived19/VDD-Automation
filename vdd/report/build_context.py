@@ -44,8 +44,12 @@ _ENTITY_TYPE_LABEL = {
 }
 
 
+# The annex rows sit on a white background; this was rgba(255,255,255,.42)
+# -- white at 42%, a dark-panel style -- so every evidence sub-line in every
+# report since the first commit was invisible in the PDF (noticed 2026-09-19
+# on B R Trading Co, whose AML-01 sub-line was 7,800 characters of blank).
 _EVIDENCE_STYLE = ("display:block;margin-top:3px;font-size:9.5px;line-height:1.45;"
-                    "color:rgba(255,255,255,.42);font-weight:400")
+                    "color:#6B7280;font-weight:400")
 
 
 def _headline(note: str) -> str:

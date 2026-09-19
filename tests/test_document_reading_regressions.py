@@ -210,6 +210,39 @@ def test_cesc_unlabelled_consumer_block_is_parsed():
     assert out["address"] == "135/11/A/2 GIRISH GHOSH, RD BELURMATH, LP-30/14/3, HOWRAH 711201"
 
 
+_TANGEDCO_BILL = """
+TAMILNADU POWER DISTRIBUTION CORPORATION LIMITED
+Registered Office : No:144, NPKRR Maaligai, Anna Salai, Chennai - 600 002
+Tax Invoice for LT Current Consumption Charges for the Month of July  2026
+Servie Connection Number
+03-281-002-2873
+Name/Address & GST of the Consumer
+SKANDAN PLASTRIX PRIVATE LIMITED
+SF.no:67/2A1 Site No:164,Arignar Anna Industrial Park  ,KITTAMPALAYAM.,Sulu
+State: TAMILNADU
+State Code
+33
+Consumer GST No:
+GSTN No:
+33AADCT4784E1ZC
+Invoice No: L432260765287768 / Date: 25/07/2026
+Sanctioned Load
+47.0 KW
+"""
+
+
+def test_tangedco_bill_name_and_address_are_read_not_the_rest_of_the_bill():
+    """The one label "Name/Address & GST of the Consumer" contains 'Address', so
+    the generic Address regex used to match it and swallow everything after it;
+    the TANGEDCO branch below it never ran (Skandan Plastrix, 2026-09-18)."""
+    out = parse_electricity_bill(_TANGEDCO_BILL)
+    assert out["consumer_name"] == "SKANDAN PLASTRIX PRIVATE LIMITED"
+    assert out["address"].startswith("SF.no:67/2A1 Site No:164") and out["address"].endswith("Sulu")
+    assert "GST of the Consumer" not in out["address"] and "Invoice" not in out["address"]
+    assert out["sanctioned_load"] == "47.0 KW"
+    assert "gstin" not in out   # 33AADCT4784E1ZC is the utility's own GSTIN, not the consumer's
+
+
 def test_label_words_are_not_localities_and_devanagari_digits_are_digits():
     prem, place, _ = _addr_token_sets("Name Of Premises/Building: s v co op industrial estate, plot no ३८२")
     assert "name" not in place and "382" in prem
@@ -327,3 +360,50 @@ def test_udyam_vs_gst_conflict_becomes_a_cross_check_warning():
     assert udyam_vs_gst_address_note(_GST_ADDR, "plot no 384 ida jeedimetla Hyderabad Pin 500055") == \
         "Udyam and GST registrations name the same premises."
     assert udyam_vs_gst_address_note(_GST_ADDR, None) is None
+
+
+# ---------------------------------------------------------------- four parser gaps from the Skandan folder (2026-09-18)
+from vdd.extract.parsers import parse_cancelled_cheque, parse_certificate_of_incorporation, parse_gst_certificate
+from vdd.extract.classify import classify_content
+from vdd.extract.consistency import _names_agree
+
+
+def test_cheque_holder_is_the_signature_line_not_the_validity_boilerplate():
+    out = parse_cancelled_cheque("ICICI Bank\nVALID FOR THREE MONTHS ONLY\nAC PAYEE\nA/c No.\n777705133568\n"
+                                 "FOR SKANDAN PLASTRIX PRIVATE LIMITED\nAUTHORISED SIGNATORIES")
+    assert out["account_holder"] == "SKANDAN PLASTRIX"
+    assert parse_cancelled_cheque("Valid for three months only\nFOR SRI LAXMI STEEL PROPRIETOR")["account_holder"] == "SRI LAXMI STEEL"
+
+
+def test_initials_count_in_name_agreement_but_a_conflicting_initial_does_not():
+    assert _names_agree("NAVIN K", "KANNUSAMY NAVIN")
+    assert _names_agree("M/S. B.R. TRADING COMPANY", "B R TRADING CO")
+    assert not _names_agree("NAVIN K", "SUBRAMANIAM KANNUSAMY")
+    assert not _names_agree("A PERSON", "B PERSON")
+
+
+_COI = """GOVERNMENT OF INDIA
+MINISTRY OF CORPORATE AFFAIRS
+Central Registration Centre
+Certificate of Incorporation
+I hereby certify that SKANDAN PLASTRIX PRIVATE LIMITED is incorporated on this  TWENTY NINETH day of
+NOVEMBER  TWO THOUSAND TWENTY THREE under the Companies Act, 2013 (18 of 2013) and that the company is
+Company limited by shares
+The Corporate Identity Number of the company is U24311TZ2023PTC030021
+The Permanent Account Number (PAN) of the company is ABMCS1968D*
+The Tax Deduction and Collection Account Number (TAN) of the company is CMBS25837A*
+"""
+
+
+def test_certificate_of_incorporation_is_its_own_document_type():
+    assert classify_content(_COI) == "certificate_of_incorporation"      # not pan_entity
+    out = parse_certificate_of_incorporation(_COI)
+    assert out == {"name": "SKANDAN PLASTRIX PRIVATE LIMITED", "cin": "U24311TZ2023PTC030021",
+                   "pan": "ABMCS1968D", "date_of_incorporation": "29/11/2023"}
+
+
+def test_gst_registration_date_under_date_of_validity_from():
+    text = ("Registration Number : 33ABMCS1968D1ZK\nLegal Name\nSKANDAN PLASTRIX PRIVATE LIMITED\n"
+            "Constitution of Business\nPrivate Limited Company\n  6.\n Date of Liability\n  7.\n Date of Validity\n"
+            "From\n02/01/2024\nTo\nNot Applicable\n  8.\n Type of Registration\nRegular\n")
+    assert parse_gst_certificate(text)["date_of_registration"] == "02/01/2024"

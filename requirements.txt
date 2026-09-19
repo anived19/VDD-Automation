@@ -5,6 +5,7 @@ PyMuPDF>=1.24
 Pillow>=11.0
 weasyprint>=69.0
 pdfplumber>=0.11
+openpyxl>=3.1      # analyst review workbook (vdd/review_sheet.py) -- written every run, read back by finalise_report.py
 pytest>=8.0
 
 # OCR for extract/ocr.py -- all local, offline at inference time, no

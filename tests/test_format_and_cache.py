@@ -175,3 +175,79 @@ def test_no_cache_and_network_failure_raises(tmp_path):
     c = _client(tmp_path, s)
     with pytest.raises(requests.ConnectionError):
         c._cached("/api/t")
+
+
+# ------------------------------------------------- scans with a token text layer
+def _pdf_with(tmp_path, name, text, image_cover):
+    """A one-page PDF carrying `text` and, optionally, one image covering
+    `image_cover` of the page (a stand-in for a scanned form)."""
+    import pymupdf as fitz
+    from PIL import Image
+    import io
+    p = tmp_path / name
+    doc = fitz.open()
+    page = doc.new_page(width=600, height=800)
+    if image_cover:
+        buf = io.BytesIO()
+        Image.new("RGB", (60, 80), "white").save(buf, format="PNG")
+        w, h = 600 * image_cover ** 0.5, 800 * image_cover ** 0.5
+        page.insert_image(fitz.Rect(0, 0, w, h), stream=buf.getvalue())
+    if text:
+        # one line per ~60 characters: get_text() only returns what lies on the page
+        words, lines, cur = text.split(), [], ""
+        for w in words:
+            if len(cur) + len(w) > 60:
+                lines.append(cur)
+                cur = ""
+            cur = (cur + " " + w).strip()
+        lines.append(cur)
+        for i, line in enumerate(lines[:60]):
+            page.insert_text((40, 40 + 12 * i), line, fontsize=9)
+    doc.save(str(p))
+    doc.close()
+    return str(p)
+
+
+def test_signature_stamp_on_a_scan_is_not_a_text_layer(tmp_path):
+    """Skandan's Factory License: 62 characters of e-signature stamp over a
+    full-page image read as 'digital' and the licence was never OCR'd."""
+    p = _pdf_with(tmp_path, "licence.pdf", "V S SARAVANAN DIGITALLY SIGNED 2026.04.28 16:12:30+05'30' V S SARAVANAN", 0.76)
+    assert ocr._pdf_text_layer(p) is None
+    p = _pdf_with(tmp_path, "digital.pdf", "GSTIN 27ABCDE1234F1Z5 " * 20, 0.0)
+    assert ocr._pdf_text_layer(p) is not None
+    # a letterhead image on a genuinely digital page is still a digital page
+    p = _pdf_with(tmp_path, "letterhead.pdf", "Certificate of Registration " * 30, 0.6)
+    assert ocr._pdf_text_layer(p) is not None
+
+
+def test_image_dominated_pdf_is_detected_and_force_ocr_skips_the_text_layer(tmp_path, monkeypatch):
+    p = _pdf_with(tmp_path, "kyc.pdf", "GSTIN * PAN Number MSME Registration Number " * 10, 1.0)
+    assert ocr.pdf_image_dominated(p)
+    assert not ocr.pdf_image_dominated(_pdf_with(tmp_path, "gst.pdf", "x " * 200, 0.01))
+    monkeypatch.setattr(ocr, "_pdf_to_images", lambda path: [object()])
+    monkeypatch.setattr(ocr, "_easyocr_best_rotation", lambda im: ("GSTIN 27ABCDE1234F1Z5 PAN ABCDE1234F", 5.0, 0))
+    assert ocr.extract_text(p).method == "pymupdf_text"
+    r = ocr.extract_text(p, force_ocr=True)
+    assert r.method == "easyocr" and "27ABCDE1234F1Z5" in r.text
+
+
+def test_pipeline_rereads_a_scanned_form_by_ocr_when_the_text_layer_is_only_labels(tmp_path, monkeypatch):
+    from vdd import pipeline
+    from vdd.extract.classify import ClassifiedDocs
+    from vdd.extract.ocr import ExtractionResult
+    p = _pdf_with(tmp_path, "KYC.pdf", "GSTIN * PAN Number", 1.0)
+    calls = []
+
+    def fake_extract(path, cache_dir=None, force_ocr=False):
+        calls.append(force_ocr)
+        if force_ocr:
+            return ExtractionResult(text="GSTIN: 27ABCDE1234F1Z5 PAN: ABCDE1234F", method="easyocr", confident=True)
+        return ExtractionResult(text="GSTIN * PAN Number", method="pymupdf_text", confident=True)
+    monkeypatch.setattr(pipeline, "extract_text", fake_extract)
+    reads = []
+    entity = pipeline.extract_entity(ClassifiedDocs(by_type={"kyc_form": [p]}), [], reads_out=reads)
+    assert calls == [False, True]
+    (read,) = reads
+    assert read.method == "pymupdf_text+easyocr" and read.quality == "read"
+    assert "OCR'd from the page image" in read.reason
+    assert entity.get("gstin") == "27ABCDE1234F1Z5"

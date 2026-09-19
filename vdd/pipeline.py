@@ -24,8 +24,8 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 from vdd.extract.classify import classify_folder, classify_content, ClassifiedDocs
-from vdd.extract.consistency import DocumentRead, check_consistency
-from vdd.extract.ocr import extract_text, detect_diagonal_strike
+from vdd.extract.consistency import EXPECTED_FIELDS, DocumentRead, check_consistency
+from vdd.extract.ocr import extract_text, detect_diagonal_strike, pdf_image_dominated
 from vdd.extract.parsers import parse_document
 from vdd.finoscale_api.client import FinoscaleClient, FinoscaleAPIError
 from vdd.resolve.resolvers import resolve_all, ApiBundle, Resolved
@@ -42,7 +42,7 @@ _FIELD_MERGE_MAP = {
     "date_of_registration": ["gst_certificate"],
     "taxpayer_type": ["gst_certificate"],
     "state": ["gst_certificate"],
-    "pan": ["pan_entity", "gst_certificate", "msme_certificate", "kyc_form"],
+    "pan": ["pan_entity", "gst_certificate", "certificate_of_incorporation", "msme_certificate", "kyc_form"],
     "udyam_number": ["msme_certificate"],
     "enterprise_type": ["msme_certificate"],
     "major_activity": ["msme_certificate"],
@@ -51,7 +51,7 @@ _FIELD_MERGE_MAP = {
     # Instructions.md" rule 3 this must NOT drive the vintage field or score
     # (that stays GST-anchored) -- it's carried purely so the report can state
     # the entity's true formation date alongside the GST vintage.
-    "date_of_incorporation": ["msme_certificate"],
+    "date_of_incorporation": ["certificate_of_incorporation", "msme_certificate"],
     "nic_5_code": ["msme_certificate"],
     "nic_5_description": ["msme_certificate"],
     "nic_4_code": ["msme_certificate"],
@@ -312,8 +312,24 @@ def extract_entity(docs: ClassifiedDocs, warnings: List[str], cache_dir: Optiona
                 if m:
                     cin_found = m.group(0)
             parsed = parse_document(doc_type, r.text)
-            reads.append(DocumentRead(path=f, doc_type=doc_type, method=r.method, confident=r.confident,
-                                      parsed=parsed, reason=getattr(r, "reason", "")))
+            method, reason = r.method, getattr(r, "reason", "")
+            # A scanned, filled-in form (Skandan Plastrix's KYC form, 2026-09-18)
+            # has a text layer of nothing but the blank template's labels; the
+            # values are in a full-page image. When the text layer misses what
+            # this document type should carry and the pages are image-dominated,
+            # read it again by OCR and keep whichever recovers more.
+            expected = EXPECTED_FIELDS.get(doc_type, ())
+            if (r.method == "pymupdf_text" and expected and any(not parsed.get(k) for k in expected)
+                    and pdf_image_dominated(f)):
+                r2 = extract_text(f, cache_dir=cache_dir, force_ocr=True)
+                parsed2 = parse_document(doc_type, r2.text) if r2.confident else {}
+                if sum(1 for k in expected if parsed2.get(k)) > sum(1 for k in expected if parsed.get(k)):
+                    parsed = {**parsed2, **{k: v for k, v in parsed.items() if v}}
+                    method = "pymupdf_text+easyocr"
+                    reason = ("text layer held only the form's labels; values were OCR'd from the page image"
+                              + (f"; {r2.reason}" if r2.reason else ""))
+            reads.append(DocumentRead(path=f, doc_type=doc_type, method=method, confident=r.confident,
+                                      parsed=parsed, reason=reason))
             if doc_type == "cancelled_cheque":
                 # Independent of whatever OCR text extraction found (or didn't --
                 # this still runs even when r.text is empty): a classical
@@ -390,6 +406,10 @@ def extract_entity(docs: ClassifiedDocs, warnings: List[str], cache_dir: Optiona
     # statutory registrations against each other.
     if doc_data.get("msme_certificate", {}).get("address"):
         entity["udyam_address"] = doc_data["msme_certificate"]["address"]
+    # The registrar's certificate is the authoritative CIN; anything found by
+    # regex elsewhere in the folder is second choice.
+    if doc_data.get("certificate_of_incorporation", {}).get("cin"):
+        cin_found = doc_data["certificate_of_incorporation"]["cin"]
     if cin_found:
         # Only a company or LLP has a CIN. For any other constitution a CIN
         # found on some document belongs to someone else (a bank, a utility,

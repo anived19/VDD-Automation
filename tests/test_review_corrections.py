@@ -69,3 +69,45 @@ def test_entity_fields_section_lists_every_field_with_missing_ones_visible():
     assert "- gstin: '33AAAAA0000A1Z5'" in txt
     assert "- partners: <list of 2>" in txt
     assert "- date_of_registration: None  (report shows N/A / Not Available)" in txt
+
+
+def _correct_param(pid, value, note="recheck_gstin_live: GSTR3B 3 late, max delay 8 days"):
+    return {"field": None, "parameter_id": pid, "action": "correct", "confidence": "verified",
+            "proposed_value": value, "proposed_note": note, "issue": "wording contradicts the evidence"}
+
+
+def test_note_only_correction_keeps_the_value(monkeypatch):
+    """A reviewer objecting to the wording (proposed_value null) must not turn a
+    scored parameter into an unresolved one (Skandan Plastrix, 18-Sep: 3/3 -> 0/3)."""
+    from vdd.resolve.resolvers import Resolved
+    st = _state([_correct_param("com_gst_delay_days", None)], monkeypatch=monkeypatch)
+    st["resolved"] = {"com_gst_delay_days": Resolved.ok(8.0, "ongrid filing_data", note="max delay 8 days")}
+    out = graph.apply_corrections(st)
+    r = out["resolved"]["com_gst_delay_days"]
+    assert r.value == 8.0 and not r.unresolved and r.source == "llm-review"
+    assert "3 late" in r.note
+    (rec,) = out["corrections_applied"]
+    assert rec["note_only"] is True and rec["before"]["value"] == 8.0
+
+
+def test_value_correction_still_replaces_the_value(monkeypatch):
+    from vdd.resolve.resolvers import Resolved
+    st = _state([_correct_param("com_gst_delay_days", 14.0)], monkeypatch=monkeypatch)
+    st["resolved"] = {"com_gst_delay_days": Resolved.ok(8.0, "ongrid filing_data")}
+    out = graph.apply_corrections(st)
+    assert out["resolved"]["com_gst_delay_days"].value == 14.0
+
+
+def test_note_only_correction_on_unresolved_parameter_is_escalated(monkeypatch):
+    from vdd.resolve.resolvers import Resolved
+    st = _state([_correct_param("com_pf_filing_status", None)], monkeypatch=monkeypatch)
+    st["resolved"] = {"com_pf_filing_status": Resolved.missing("no EPFO data")}
+    out = graph.apply_corrections(st)
+    assert out["corrections_applied"] == [] and len(out["escalations"]) == 1
+    assert out["resolved"]["com_pf_filing_status"].unresolved
+
+
+def test_field_correction_without_a_value_is_escalated(monkeypatch):
+    out = graph.apply_corrections(_state([_correct("date_of_registration", value=None)], monkeypatch=monkeypatch))
+    assert out["corrections_applied"] == [] and len(out["escalations"]) == 1
+    assert "date_of_registration" not in out["entity"]
