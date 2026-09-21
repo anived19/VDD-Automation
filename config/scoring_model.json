@@ -661,6 +661,11 @@
               "expr": "value == \"listed\"",
               "condition": "Listed on sanctions",
               "assignedScore": 0
+            },
+            {
+              "expr": "value == \"adverse_watchlist\"",
+              "condition": "Adverse record on a regulatory watchlist — review",
+              "assignedScore": 0
             }
           ],
           "scoringMethod": "range",
