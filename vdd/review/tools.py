@@ -215,12 +215,13 @@ def make_tools(client: Optional[FinoscaleClient]) -> list:
                                            type_=type_, country=["India"], cin=cin, pan=pan, llpin=llpin)
         except FinoscaleAPIError as e:
             return {"error": f"[{e.status_code}] {e.message}"}
-        summary = summarize_screen(raw, entity_name)
+        summary = summarize_screen(raw, entity_name, vendor_pan=pan)
         ec = raw.get("entitychecks") if isinstance(raw, dict) else None
         block = ec[0] if isinstance(ec, list) and ec and isinstance(ec[0], dict) else {}
         return {"comprehensive": summary["_comprehensive"], "error": summary["_error"],
                 "categories_screened": sum(1 for v in block.values() if isinstance(v, list)),
-                "hits": {k: v for k, v in summary.items() if not k.startswith("_")}}
+                "hits": {k: v for k, v in summary.items() if not k.startswith("_")},
+                "namesakes_dismissed": summary.get("_dismissed", [])}
 
     def web_search(query: str) -> list[dict]:
         """Open-ended web search for anything not covered by the tools

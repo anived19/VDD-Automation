@@ -123,10 +123,15 @@ def _classify_constitution(raw: str) -> Optional[str]:
     return None
 
 
+_NAME_NOISE = {"private", "pvt", "limited", "ltd", "llp", "co", "company", "ms", "m", "s", "messrs", "the"}
+
+
 def _name_match(a: str, b: str) -> Optional[bool]:
     if not a or not b:
         return None
-    norm = lambda s: set(re.sub(r'[^a-z0-9 ]', '', s.lower()).split())
+    # 'MANGAL IRON PVT.LTD.' is 'MANGAL IRON PRIVATE LIMITED' (a bank's
+    # penny-drop holder name, 2026-09-19); suffixes and M/S carry no identity.
+    norm = lambda s: {t for t in re.sub(r'[^a-z0-9 ]', ' ', s.lower()).split() if t not in _NAME_NOISE}
     sa, sb = norm(a), norm(b)
     if not sa or not sb:
         return None
@@ -521,13 +526,18 @@ def resolve_addr_ownership_type(has_rental_doc: bool, has_electricity_doc: bool,
     # 2026-09-18; the bucket is an addition to the scoring model).
     if electricity is not None and not electricity.unresolved and electricity.value == "not_match":
         what = "rental/lease agreement" if has_rental_doc else "electricity bill"
+        unread = "could not be read" in (electricity.note or "") or "No electricity bill" in (electricity.note or "")
         return Resolved.ok("address_mismatch",
                            f"doc:{'rental_agreement' if has_rental_doc else 'electricity_bill'} present, but "
                            "addr_electricity_bill=not_match",
-                           note=f"The {what} on file is for premises at a different address from the GST "
-                                "registration (see the electricity-bill row), so it does not establish the "
-                                "ownership status of the registered premises. Obtain the bill and the sale "
-                                "deed / rental agreement for the GST-registered address.")
+                           note=(f"The {what} on file could not be read, so it does not establish the ownership "
+                                 "status of the registered premises (see the electricity-bill row). Obtain a "
+                                 "legible bill and the sale deed / rental agreement for the GST-registered address."
+                                 if unread else
+                                 f"The {what} on file is for premises at a different address from the GST "
+                                 "registration (see the electricity-bill row), so it does not establish the "
+                                 "ownership status of the registered premises. Obtain the bill and the sale "
+                                 "deed / rental agreement for the GST-registered address."))
     if has_rental_doc:
         return Resolved.ok("rented", "doc:rental_agreement present",
                             note="Cannot distinguish 'rented' vs 'leased' from document presence alone")
@@ -539,15 +549,18 @@ def resolve_addr_ownership_type(has_rental_doc: bool, has_electricity_doc: bool,
             # it is evidence AGAINST ownership -- inferring "owned" from it was a
             # real defect (2026-09-17: a bill in a third party's name corroborated
             # an "owned" verdict). Without a rental/lease agreement on file the
-            # honest answer is unresolved, with the reason spelled out.
-            return Resolved.missing(
-                f"GAP: the electricity connection at the premises is in a third party's name "
-                f"('{entity['electricity_bill_consumer_name'].strip()}'), not the entity's -- the usual sign of "
-                "rented/leased premises -- but no rental/lease agreement is on file, so the ownership type "
-                "cannot be inferred. Obtain the rental agreement and landlord NOC (or a sale deed if the "
-                "premises are in fact owned).",
-                source="doc:electricity_bill present (consumer name does not match the entity), no "
-                       "rental/lease agreement in document set")
+            # honest answer is the 0 option -- Proof of Address never scores
+            # "unresolved" (analysts' rule, 2026-09-21): the proof on file does
+            # not establish the status of the registered premises.
+            return Resolved.ok(
+                "address_mismatch",
+                "doc:electricity_bill present (consumer name does not match the entity), no "
+                "rental/lease agreement in document set",
+                note=f"GAP: the electricity connection at the premises is in a third party's name "
+                     f"('{entity['electricity_bill_consumer_name'].strip()}'), not the entity's -- the usual sign of "
+                     "rented/leased premises -- but no rental/lease agreement is on file, so the ownership status "
+                     "of the registered premises is not established. Obtain the rental agreement and landlord NOC "
+                     "(or a sale deed if the premises are in fact owned).")
         # No sale deed in the document set, so ownership is inferred. Spell out the
         # corroborating evidence rather than calling it a bare assumption -- the
         # report prints ScoringModel.json's own condition label here ("Owned --
@@ -568,7 +581,9 @@ def resolve_addr_ownership_type(has_rental_doc: bool, has_electricity_doc: bool,
         note += ". Obtain the sale deed or property-tax receipt to convert this from inferred to confirmed."
         return Resolved.ok("owned", "doc:electricity_bill present, no rental/lease agreement in document set",
                             note=note)
-    return Resolved.missing("Neither a rental agreement nor an electricity bill is on file")
+    return Resolved.ok("address_mismatch", "no sale deed, rental/lease agreement or electricity bill in the document set",
+                       note="GAP: neither a sale deed, a rental/lease agreement nor an electricity bill is on file, so "
+                            "the ownership status of the registered premises is not established.")
 
 
 def resolve_addr_rental_validation(ownership: Resolved, electricity: Resolved) -> Resolved:
@@ -585,9 +600,19 @@ def resolve_addr_rental_validation(ownership: Resolved, electricity: Resolved) -
         return Resolved.ok("rented_matching", "addr_ownership_type + addr_electricity_bill")
     if not ownership.unresolved and ownership.value == "address_mismatch":
         return Resolved.ok("not_match", "derived from addr_ownership_type=address_mismatch",
-                           note="The premises proof on file is for a different address than the GST registration.")
-    return Resolved.missing(
-        "Ownership type unresolved, or rented without a confirmed matching electricity-bill address")
+                           note="The premises status is not established (see the ownership row).")
+    if not ownership.unresolved and ownership.value in ("rented", "leased") \
+            and not electricity.unresolved and electricity.value == "minor_discrepancy":
+        return Resolved.ok("minor_discrepancy", "addr_ownership_type + addr_electricity_bill",
+                           note=f"Premises are {ownership.value}; the electricity bill matches the GST address "
+                                "with a minor discrepancy.")
+    # Rented/leased with a non-matching or absent bill, or an ownership row an
+    # analyst blanked: Proof of Address never scores "unresolved".
+    return Resolved.ok("not_match", "addr_ownership_type + addr_electricity_bill",
+                       note="Rented/leased premises without an electricity bill that matches the GST-registered "
+                            "address" if not ownership.unresolved else
+                            "Ownership type not established, so the agreement cannot be validated against the "
+                            "GST-registered address")
 
 
 def resolve_addr_landlord_declaration(ownership: Resolved, has_landlord_doc: bool = False) -> Resolved:
@@ -605,16 +630,20 @@ def resolve_addr_landlord_declaration(ownership: Resolved, has_landlord_doc: boo
                                  "itself, so there is no landlord and no owner NOC to obtain "
                                  "(ScoringModel.json: CONDITIONAL -- omit for owned premises).")
     if not ownership.unresolved and ownership.value == "address_mismatch":
-        return Resolved.missing("The premises proof on file is for a different address, so whether a landlord "
-                                "NOC applies to the GST-registered premises cannot be determined.")
+        return Resolved.ok("absent", "no landlord-declaration document in the document set",
+                            note="GAP: the premises status is not established and no landlord NOC for the "
+                                 "GST-registered address is on file.")
     if not ownership.unresolved and ownership.value in ("rented", "leased"):
         # A genuine documentation gap, not an N/A -- rented premises are expected
         # to have the landlord's NOC for commercial use at the registered address.
         return Resolved.ok("absent", "no landlord-declaration document in the document set",
                             note=f"GAP: premises are {ownership.value}, so a landlord NOC permitting business "
                                  f"use at the registered address is required, but none is on file.")
-    return Resolved.missing("Ownership type is unresolved, so it cannot be determined whether a landlord "
-                             "declaration is required (N/A for owned premises) or missing (rented/leased).")
+    # Ownership is never unresolved any more (see resolve_addr_ownership_type),
+    # but an analyst can still blank it in the workbook; then the NOC is absent.
+    return Resolved.ok("absent", "no landlord-declaration document in the document set",
+                        note="GAP: the ownership type is not established and no landlord NOC for the "
+                             "GST-registered address is on file.")
 
 
 # Address-comparison helpers. A pincode is only one field of an address and is
@@ -749,6 +778,7 @@ class PlotComparison:
     b: set
     kinds_a: tuple = ()
     kinds_b: tuple = ()
+    agree: bool = False     # some kind is named on both sides and shares a number ("Plot 15" = "Plot 15")
 
     def incomparable_note(self, label_a: str, label_b: str) -> str:
         ka = " and ".join(_PLOT_KIND_LABEL[k] for k in self.kinds_a)
@@ -765,11 +795,12 @@ def _compare_plots(a: str, b: str) -> PlotComparison:
     ia, ib = _premises_ids(a or ""), _premises_ids(b or "")
     common = set(ia) & set(ib)
     conflict = any(not (ia[k] & ib[k]) for k in common)
+    agree = any(bool(ia[k] & ib[k]) for k in common)
     comparable = bool(common) or not (ia and ib)
     return PlotComparison(conflict=conflict, comparable=comparable,
                           a=set().union(*ia.values()) if ia else set(),
                           b=set().union(*ib.values()) if ib else set(),
-                          kinds_a=tuple(sorted(ia)), kinds_b=tuple(sorted(ib)))
+                          kinds_a=tuple(sorted(ia)), kinds_b=tuple(sorted(ib)), agree=agree)
 
 
 def _plots_conflict(a: str, b: str):
@@ -825,10 +856,16 @@ def resolve_addr_electricity_bill(gst_address: Optional[str], bill_address: Opti
                                    entity_name: Optional[str] = None,
                                    factory_license_address: Optional[str] = None,
                                    pcb_address: Optional[str] = None) -> Resolved:
+    # Proof of Address never scores "unresolved" (analysts' rule, 2026-09-21):
+    # a bill that is missing, unreadable, or not comparable is "not match",
+    # with the reason in the note.
+    src0 = "electricity_bill vs gst_certificate principal address"
     if not bill_address and not bill_pincode:
-        return Resolved.missing("No electricity bill address/pincode extracted")
+        return Resolved.ok("not_match", src0,
+                           note="No electricity bill address could be read -- no bill on file, or the bill was "
+                                "unreadable (see the Documents sheet).")
     if not gst_address:
-        return Resolved.missing("No GST certificate address to compare against")
+        return Resolved.ok("not_match", src0, note="No GST certificate address to compare the bill against.")
     licensed_addresses = (("Factory License", factory_license_address), ("PCB consent", pcb_address))
 
     src = "electricity_bill address/pincode/consumer-name vs gst_certificate principal address"
@@ -846,7 +883,10 @@ def resolve_addr_electricity_bill(gst_address: Optional[str], bill_address: Opti
     # minor_discrepancy and is stated in the note.
     plots = _compare_plots(gst_address, " ".join(x for x in (bill_address, bill_village) if x))
     plots_conflict, gst_plots, bill_plots = plots.conflict, plots.a, plots.b
-    premises_match = bool(gst_prem & bill_prem) and not plots_conflict
+    # A plot / door number named after its keyword is the premises identity
+    # whatever its length ("Plot 15" on both sides), on top of the generic
+    # token overlap for compound numbers like 135/11/A/2.
+    premises_match = (bool(gst_prem & bill_prem) or plots.agree) and not plots_conflict
     place_hits = _place_overlap(gst_place, bill_place)
     # 'Door No. 12' on the bill and 'Sy. No. 12/3' on the certificate is neither
     # a match nor a conflict; the note must say so instead of "could not be
@@ -867,61 +907,57 @@ def resolve_addr_electricity_bill(gst_address: Optional[str], bill_address: Opti
         # A compound number that matched whole ('135/11/A/2') is listed once, not
         # also by its parts.
         shared -= {p for t in shared if '_' in t for p in _compound_parts(t)}
+        shared = shared or (plots.a & plots.b)
         evidence.append(f"premises identifier matches ({'/'.join(sorted(t.replace('_', '/') for t in shared))})")
     if place_hits:
         evidence.append(f"locality/city matches ({', '.join(sorted(place_hits))})")
     if name_match is True:
         evidence.append(f"bill consumer name '{(bill_consumer_name or '').strip()}' matches the entity")
-
-    if gst_pin and bill_pin and gst_pin == bill_pin:
+    pins_agree = bool(gst_pin and bill_pin and gst_pin == bill_pin)
+    pins_differ = bool(gst_pin and bill_pin and gst_pin != bill_pin)
+    if pins_agree:
         evidence.append(f"PIN {gst_pin} matches")
-        if plots_conflict:
-            return Resolved.ok("minor_discrepancy", src, note="; ".join(evidence))
-        if not premises_match and not place_hits:
-            # A PIN covers a whole post-office area. On its own -- no premises
-            # number, no locality word in common -- it says "same neighbourhood",
-            # not "same address"; typically the bill's address text was
-            # unreadable and only the six digits survived OCR.
-            return Resolved.ok("minor_discrepancy", src,
-                                note="; ".join(evidence) + " but nothing else does -- no premises identifier "
-                                "or locality text in common (" + prem_unmatched_note + "); the bill's address "
-                                "text may not have been read; confirm against the document")
-        return Resolved.ok("match", src, note="; ".join(evidence))
-
-    if gst_pin and bill_pin and gst_pin != bill_pin:
-        pin_note = (f"NOTE: the bill's printed PIN ({bill_pin}) differs from the GST-registered PIN "
-                     f"({gst_pin})")
-        # Premises identifier + locality + consumer name all agreeing identifies the
-        # same physical premises beyond reasonable doubt; a lone wrong PIN on the
-        # utility's record is a data-quality defect in the bill, not a different
-        # address. Requiring all three keeps this from firing on a genuinely
-        # different premises (where the plot number would not agree).
-        if premises_match and len(place_hits) >= 2 and name_match is True:
-            # Everything but the PIN agrees -- almost certainly the utility's
-            # record -- but a differing PIN is never a full match (analyst
-            # decision 2026-09-19; it was scored "match" before).
-            return Resolved.ok("minor_discrepancy", src, note="; ".join(evidence) + f". {pin_note} "
-                                "-- plot number, locality/city and consumer name all agree, so this is most "
-                                "likely a utility-record error, but a PIN difference is never a full match.")
-        if premises_match or place_hits:
-            return Resolved.ok("minor_discrepancy", src,
-                                note="; ".join(evidence or ["partial address overlap only"]) + f". {pin_note}")
-        lic_note = _licensed_premises_note(bill_address, bill_village, licensed_addresses)
-        return Resolved.ok("not_match", src,
-                            note=f"{pin_note}, and neither the premises identifier nor the locality "
-                                 f"text overlaps the GST-registered address"
-                                 + (f" {lic_note}" if lic_note else ""))
-
-    # Only one side has a usable PIN -- fall back to the component comparison.
-    if premises_match and place_hits:
-        return Resolved.ok("match", src, note="; ".join(evidence) + " (no PIN available on both sides to cross-check)")
-    if place_hits:
-        return Resolved.ok("minor_discrepancy", src,
-                            note="; ".join(evidence) + ("" if plots_conflict else f" but {prem_unmatched_note}"))
+    pin_note = (f"NOTE: the bill's printed PIN ({bill_pin}) differs from the GST-registered PIN ({gst_pin})"
+                if pins_differ else "")
     lic_note = _licensed_premises_note(bill_address, bill_village, licensed_addresses)
-    return Resolved.missing("Could not confidently compare the electricity bill address to the GST address "
-                             "(no PIN on both sides, and no premises/locality token overlap)."
-                             + (f" {lic_note}" if lic_note else ""))
+
+    # The premises number decides (analysts' rule, 2026-09-21):
+    #   * a different plot / door / house number is a different address --
+    #     155 Saraswati Nagar is not 157 Saraswati Nagar -- "not match", even
+    #     with the locality and PIN agreeing (Sri Laxmi Steel: plot 382 vs
+    #     384/385, same estate);
+    #   * the same number with everything else agreeing is a match;
+    #   * the same number with the locality named differently, or the PIN off,
+    #     is a minor discrepancy -- 15 Saraswati Nagar "on University Road" vs
+    #     "on Patel Nagar Road" is one place described two ways;
+    #   * when the number cannot be compared, agreeing locality or PIN is a
+    #     minor discrepancy (partial evidence), nothing in common is not match.
+    if plots_conflict:
+        return Resolved.ok("not_match", src, note="; ".join(evidence) + (f". {pin_note}" if pin_note else "")
+                           + (f" {lic_note}" if lic_note else ""))
+    if premises_match:
+        if place_hits and not pins_differ:
+            return Resolved.ok("match", src, note="; ".join(evidence)
+                               + ("" if pins_agree else " (no PIN on both sides to cross-check)"))
+        if place_hits:
+            return Resolved.ok("minor_discrepancy", src,
+                               note="; ".join(evidence) + f". {pin_note} -- the premises number and locality agree, "
+                                    "so this is most likely a utility-record error, but a PIN difference is never "
+                                    "a full match.")
+        return Resolved.ok("minor_discrepancy", src,
+                           note="; ".join(evidence) + " but the locality/street is named differently on the two "
+                                "documents" + (f". {pin_note}" if pin_note else ""))
+    # No comparable premises number.
+    if place_hits or pins_agree:
+        why = (prem_unmatched_note if plots.comparable else prem_unmatched_note)
+        return Resolved.ok("minor_discrepancy", src,
+                           note="; ".join(evidence) + f" but {why}" + (f". {pin_note}" if pin_note else "")
+                                + ("" if place_hits else " -- only the PIN agrees; the bill's address text may not "
+                                                        "have been read; confirm against the document"))
+    return Resolved.ok("not_match", src,
+                       note="The electricity bill address shares nothing with the GST-registered address "
+                            "(no premises number, locality word or PIN in common)"
+                            + (f". {pin_note}" if pin_note else ".") + (f" {lic_note}" if lic_note else ""))
 
 
 def udyam_vs_gst_address_note(gst_address: Optional[str], udyam_address: Optional[str]) -> Optional[str]:
@@ -980,7 +1016,9 @@ def _resolve_addr_msme_status(api: ApiBundle, doc_udyam_number: Optional[str]) -
         # just not live-verified against the Udyam registry.
         return Resolved.ok("valid_active", "doc:msme_certificate.udyam_number",
                             note="Not cross-checked against Ongrid MSME verification this run")
-    return Resolved.missing("No Ongrid MSME lookup performed and no Udyam number found on any document")
+    return Resolved.ok("not_valid", "no Udyam number on any document and no Ongrid MSME lookup this run",
+                       note="No Udyam registration evidenced: no MSME certificate in the document set and the "
+                            "registry was not queried.")
 
 
 # ==================================================================== PROOF OF IDENTITY
@@ -1202,7 +1240,8 @@ _ZIGRAM_ADVERSE_VALUE = {
 }
 
 
-def resolve_aml(api: ApiBundle, entity_name: str = None, partner_names: List[str] = None) -> dict:
+def resolve_aml(api: ApiBundle, entity_name: str = None, partner_names: List[str] = None,
+                vendor_pan: Optional[str] = None, owner_pan: Optional[str] = None) -> dict:
     """All five legal_* parameters.
 
     Zigram is now the PRIMARY sweep for all five (2026-09-08) -- see
@@ -1249,8 +1288,10 @@ def resolve_aml(api: ApiBundle, entity_name: str = None, partner_names: List[str
     # PEP is a person-level check; DRT/SARFAESI is entity + persons.
     persons = [n for n in ordered if not entity_name or n.strip().lower() != entity_name.strip().lower()]
 
-    firm_summary = summarize_screen(api.zigram, entity_name or "the entity")
-    owner_summary = summarize_screen(api.zigram_owner, "the owner") if api.zigram_owner else {}
+    firm_summary = summarize_screen(api.zigram, entity_name or "the entity", vendor_pan=vendor_pan)
+    owner_summary = (summarize_screen(api.zigram_owner, (partner_names or ["the owner"])[0], vendor_pan=owner_pan)
+                     if api.zigram_owner else {})
+    dismissed = list(firm_summary.get("_dismissed", [])) + list(owner_summary.get("_dismissed", []))
     zigram_comprehensive = firm_summary.get("_comprehensive", False)
 
     def _hits(pid: str) -> List[str]:
@@ -1282,6 +1323,15 @@ def resolve_aml(api: ApiBundle, entity_name: str = None, partner_names: List[str
         "legal_ecourts": _via_zigram_or_fallback(
             "legal_ecourts", lambda: Resolved.missing(_ECOURTS_BLOCKER, "manual")),
     }
+
+    if dismissed:
+        # The namesakes the screen threw out are on record on AML-01, so the
+        # analyst can see the check was made and on what evidence.
+        cur = out["legal_sanctions"]
+        out["legal_sanctions"] = Resolved(value=cur.value, source=cur.source,
+                                          note=((cur.note + " | ") if cur.note else "") + "Zigram namesakes dismissed: "
+                                               + "; ".join(dismissed),
+                                          unresolved=cur.unresolved)
 
     other_hits = _hits("other")
     if other_hits:
@@ -1382,15 +1432,23 @@ def resolve_com_bank_verification(entity: dict, api: Optional["ApiBundle"] = Non
             resp_bank = (data or {}).get("bank_name")
             ev.append(f"Live penny drop via Ongrid bank-verification succeeded -- account holder name "
                       f"returned: '{holder_name}'" + (f" at {resp_bank}" if resp_bank else ""))
-            if match is False:
-                ev.append(f"CRITICAL: the returned account-holder name does not match the GST-registered "
-                          f"legal name '{legal_name}'")
-                return Resolved.ok("penny_success_gst_mismatch",
-                                    "api:ongrid.bank-verification.verify (live penny drop)", note="; ".join(ev))
+            # The holder name is compared with every name the vendor goes by --
+            # legal, trade, and the partners/proprietor (a proprietorship's
+            # account is routinely in the trade name or the proprietor's own).
+            # A mismatch is a CRITICAL note for the findings, never the "GST
+            # mismatch" bucket: that bucket means the GST portal registers a
+            # different account (analysts' rule, 2026-09-21).
+            names = [n for n in (entity.get("legal_name"), entity.get("trade_name"), entity.get("pan_entity_name"))
+                     if n] + list(entity.get("partners") or [])
+            verdicts = [_name_match(holder_name, n) for n in names]
+            match = (True if any(v is True for v in verdicts) else False if any(v is False for v in verdicts) else None)
             if match is True:
-                ev.append(f"holder name matches the GST-registered legal name '{legal_name}'")
+                ev.append("holder name matches the vendor's name on record")
+            elif match is False:
+                ev.append(f"CRITICAL: the returned account-holder name matches none of the vendor's names on record "
+                          f"({', '.join(names)}) -- confirm whose account this is")
             else:
-                ev.append("no GST-registered legal name on file to compare the holder name against")
+                ev.append("no vendor name on file to compare the holder name against")
             # "GST match" in the scoring model means the penny-dropped account
             # IS the account registered on the GST portal (the bank-details
             # screenshot) -- not that the holder name matches the legal name,
@@ -1506,5 +1564,6 @@ def resolve_all(entity: dict, docs, api: ApiBundle) -> dict:
     # asks for "proprietor and all partners" (PEP) and "firm and all directors"
     # (wilful defaulter), so an entity-name-only screen under-covers the parameter.
     out.update(resolve_aml(api, entity.get("legal_name") or entity.get("trade_name"),
-                            partner_names=entity.get("partners")))
+                            partner_names=entity.get("partners"), vendor_pan=entity.get("pan"),
+                            owner_pan=entity.get("pan_owner_pan")))
     return out

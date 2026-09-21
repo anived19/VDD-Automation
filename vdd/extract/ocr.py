@@ -215,6 +215,22 @@ def _get_easyocr_reader(langs: list[str]):
         return None
 
 
+# Early-stop bar for the rotation search (see _easyocr_best_rotation).
+OCR_EARLY_STOP_CHARS = 120
+OCR_EARLY_STOP_CONF = 0.6
+
+
+def _pass_is_confident(kept: list) -> bool:
+    """True when an OCR pass kept enough text at a high enough mean
+    confidence that trying other rotations cannot be worth 3x the time."""
+    chars = sum(len(t) for (_b, t, _c) in kept)
+    if chars < OCR_EARLY_STOP_CHARS:
+        return False
+    weights = [(len(t), c) for (_b, t, c) in kept]
+    mean_conf = sum(n * c for n, c in weights) / max(1, sum(n for n, _c in weights))
+    return mean_conf >= OCR_EARLY_STOP_CONF
+
+
 def _easyocr_best_rotation(img) -> tuple[str, float, int]:
     """Try all 4 orientations and keep whichever one the model reads
     confidently, rather than trusting EXIF (frequently absent -- see module
@@ -233,15 +249,24 @@ def _easyocr_best_rotation(img) -> tuple[str, float, int]:
     from PIL import ImageOps
     img = ImageOps.exif_transpose(img).convert("RGB")
 
-    # 1. Fast English-only brute-force rotation check
+    # 1. English-only rotation check, upright first. Almost every scan is
+    # upright; when the 0-degree pass is plainly a good read the other three
+    # rotations are skipped -- they were 3/4 of a run's OCR time (a 12-page
+    # folder took 20-40 minutes, 2026-09-19). A pass is "plainly good" when
+    # it kept enough confident text: at least OCR_EARLY_STOP_CHARS characters
+    # at >= 0.4 confidence with a mean confidence >= OCR_EARLY_STOP_CONF. A
+    # sideways page reads as a few garbled tokens and never clears that bar,
+    # so the brute force still runs for it (180 next, then 90 / 270).
     best_kept, best_score, best_angle = [], 0.0, 0
-    for angle in (0, 90, 180, 270):
+    for angle in (0, 180, 90, 270):
         rotated = img.rotate(angle, expand=True) if angle else img
         results = en_reader.readtext(np.array(rotated), detail=1)
         kept = [(bbox, t, conf) for (bbox, t, conf) in results if conf >= 0.4]
         score = sum(len(t) for (_b, t, _c) in kept)
         if score > best_score:
             best_score, best_kept, best_angle = score, kept, angle
+        if _pass_is_confident(kept):
+            break
 
     if not best_kept:
         return "", 0.0, 0

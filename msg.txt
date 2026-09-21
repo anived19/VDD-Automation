@@ -1,212 +1,121 @@
-fix: PDF page/footer/header, LLM note-only corrections, TANGEDCO bill, parser gaps, Zigram dedupe, seller type, bank 'GST match', PIN mismatch; feat: address_mismatch + adverse_watchlist buckets, scored watchlist hits, option-only annex, readable analyst workbook
+feat(scoring): analysts' rules of 21 Sep -- Proof of Address never unresolved, premises number decides the bill match, GST-mismatch means the portal account, Zigram namesakes dismissed, annex shows options only, findings carry every caveat; perf: OCR upright-first early stop, API retries
 
-PDF (vdd/report/render.py, assets/template_head.html)
-  The report is one tall page sized to its content, but the height search
-  stopped at 4200px. A report with more notes than that (Sri Laxmi Steel
-  needs ~4460px now that the address and consistency notes are fuller)
-  overflowed onto a second page carrying only the footer -- or part of the
-  annex -- and otherwise blank. The page now grows (doubling) until the
-  content fits, then binary-searches down to the tightest height; nothing
-  is capped short of 40000px.
-  The footer is now just "finoscale.ai" on the left and "For queries:
-  www.finoscale.ai" on the right; the tagline and the disclaimer paragraph
-  are gone, and the query line is legible instead of 25% white on slate.
+Four decisions from the analysts and the founder on 21 Sep, applied
+together.
 
-Analyst review workbook (vdd/review_sheet.py -- writer rewritten, reader
-and applier unchanged)
-  The workbook the analysts were handed was unreadable: 13 columns with the
-  software's ids in the middle, frozen panes, and every long evidence note
-  clipped to one 15pt line because Excel does not measure row heights for a
-  file openpyxl wrote.
-  - Review sheet, left to right: Code, Parameter, System value, Meaning,
-    Score, Max, Evidence, Analyst value, Analyst note, Preview score. The
-    parameter id, source and original value the software reads back are
-    still there but hidden (columns K-M); unhide if needed.
-  - Every row gets an explicit height from its longest wrapped cell, so a
-    five-line evidence note shows as five lines. Calibri 11, thin borders,
-    gridlines off, section rows tinted, totals row shaded.
-  - No frozen panes on any sheet.
-  - The analyst's name is a yellow cell at the top of the Review sheet
-    (B3), read back from there; Meta's name cell remains as the fallback so
-    older workbooks still work.
-  - Score summary (System / Max / Preview per section and total) sits
-    between the instructions and the table; title and notes are merged
-    across the visible columns.
-  - Flags sheet is two columns, "Where" and "Detail", so a parameter id or
-    filename is separable from its message; section headers carry counts;
-    cross-check items are the full notes, not the 220-character terminal
-    cut.
-  - Documents sheet: same columns, last one is "Missing fields / reason".
-  - Sheet order is the order of work: Review, Entity fields, Documents,
-    Flags, then Choices, Audit, Meta.
+1. Proof of Address never scores "unresolved" (resolvers.py,
+   config/scoring_model.json, review_sheet.py, review/graph.py)
+   Every POA row resolves to one of its options; missing, unreadable or
+   incomparable evidence lands on the row's 0 option with the reason in the
+   workbook's Evidence column.
+   - POA-02: no bill readable, no GST address, or nothing comparable ->
+     not_match.
+   - POA-01: a bill in a third party's name with no rental agreement, or no
+     deed / agreement / bill at all -> address_mismatch, relabelled "Not
+     established -- premises proof missing, in a third party's name, or for
+     a different address". No new option was added.
+   - POA-03 follows: rented/leased + minor bill -> minor_discrepancy;
+     otherwise not_match. POA-05: premises not established -> absent (owned
+     stays N/A). POA-04: no Udyam number and no lookup -> not_valid.
+   - The POA rows' workbook dropdowns no longer offer "unresolved" and the
+     validator rejects it there (NO_UNRESOLVED_CATEGORIES); an LLM
+     correction whose proposed_value is not one of the row's options is
+     escalated instead of applied (_bucket_values) -- it would have scored
+     as unresolved.
 
-Report header (vdd/report/render.py location())
-  Every report read "Town, <State>": the city label was derived by a
-  comma-split heuristic that also split on '/', so on the GST certificate's
-  labelled address the fragment 'Town' (from 'City/Town/Village') landed
-  as the city. Labelled fields (City/Town/Village, City, Village/Town,
-  District, State) are now read directly, with the district standing in
-  when there is no city label; the heuristic remains for unlabelled
-  free-text addresses. Sri Laxmi Steel: "Hyderabad, Telangana"; B R
-  Trading Co: "Belurmath, West Bengal".
+2. Electricity bill vs GST address: the premises number decides
+   (resolvers.py, founder's rule)
+   - A different plot / door / house number is a different address -- 155
+     Saraswati Nagar is not 157 -- "not match", even with the locality and
+     PIN agreeing. Sri Laxmi Steel (plot 382 vs 384/385, same estate):
+     minor_discrepancy -> not_match.
+   - The same number with locality and PIN agreeing (or the PIN absent on a
+     side) is a match; the same number with the locality/street named
+     differently, or the PIN off (B R Trading 711201/711202), is a minor
+     discrepancy.
+   - No comparable number: agreeing locality or PIN is a minor discrepancy
+     (partial evidence), nothing in common is not match. A keyworded plot
+     number of any length ("Plot 15") now counts as the premises identity
+     (PlotComparison.agree).
 
-LLM review: a note-only correction no longer wipes the value (vdd/review/graph.py)
-  A reviewer finding with action=correct, confidence=verified and
-  proposed_value=null -- "the wording contradicts the evidence, keep the
-  score" -- was applied as Resolved.ok(None): the parameter became
-  unresolved and lost its points (Skandan Plastrix, 18-Sep: com_gst_delay_days
-  8 days, 3/3 -> 0/3, score 43 -> 40). The value and score are now kept
-  and only the note is replaced (recorded as note_only); a null on an
-  unresolved parameter or on an entity field is escalated instead. The
-  schema tells the reviewer what null means.
+3. Bank verification: "GST mismatch" means the GST portal registers a
+   different account (resolvers.py)
+   A vendor with no portal screenshot is always "Penny drop successful +
+   GST unavailable" (2). A penny-drop holder name that matches none of the
+   vendor's names is a CRITICAL note for the findings, never the mismatch
+   bucket -- and the holder name is now compared with the legal name, the
+   trade name and the partners (a proprietorship's account is routinely in
+   the trade name: Sri Laxmi Steel, 1 -> 2). _name_match ignores corporate
+   suffixes and M/S ("MANGAL IRON PVT.LTD." = "MANGAL IRON PRIVATE
+   LIMITED").
 
-Electricity bill, Tamil Nadu (vdd/extract/parsers.py)
-  TANGEDCO's one label "Name/Address & GST of the Consumer" contains
-  "Address", so the generic Address regex matched it and took the rest of
-  the bill as the address; the TANGEDCO branch beneath it was dead. It now
-  runs first, and the generic regex no longer matches "Name/Address". The
-  Skandan bill yields its consumer name and street address again (the
-  ownership note reads "connection is in the entity's own name" instead of
-  "corroborated by: with a 47.0 KW sanctioned load").
+4. Zigram namesakes are dismissed on the response's own evidence
+   (aml/zigram_screening.py, resolvers.py, review/tools.py)
+   A fresh Zigram call for B R Trading Co (PAN AADFB0389G, West Bengal)
+   returned the same 19 rows on Maharashtra's GST non-genuine-dealer list --
+   every row a different Maharashtra firm with its own GSTIN
+   (27EBDPG9119N1Z7 x13, 27CGYPG7879K1Z5, 27AKLPD7385G1ZU,
+   27CRYPV9120P5ZB). Zigram matched the name and ignored the PAN we sent;
+   the analysts' own Zigram case called "MS R R TRADING COMPANY" a 99%
+   exact match for "B.R. TRADING COMPANY". Two gates before a row counts:
+   the listed record's PAN / GSTIN differs from the vendor's, or the
+   matched name fails the initials-aware name check. Dismissals are counted
+   on AML-01's note ("Zigram namesakes dismissed: 19 row(s) on '...' --
+   listed entity's PAN ... is not the vendor's ..."). Rows with neither a
+   PAN nor a usable name still stand for the analyst (Skandan's ESIC hit).
+   B R Trading Co AML 4/5 -> 5/5, header "AML Cleared".
 
-Address tokens (vdd/resolve/resolvers.py)
-  "tamil", "uttar", "madhya", "andhra", "west", ... join the state-word stop
-  list: "tamil" alone was a locality match shared by every address in Tamil
-  Nadu. A slash between words now separates them, so "City/Town/Village"
-  and "Road/Street" (the certificate's own labels) dissolve into stop words
-  instead of junk tokens. Skandan Plastrix's electricity-bill parameter
-  stays unresolved (0/2): the bill is for the Kittampalayam factory, the
-  GST address is the Ramanathapuram office, and the PCB consent corroborates
-  the factory -- the old 44 had scored it "minor discrepancy" on a meter
-  reading (86149.5) mistaken for a PIN and "tamil" as a shared locality.
-  Skandan Plastrix deterministic: 43 (was 44 on ea9140b, for that reason).
+5. Report layout (report/build_context.py)
+   - The scoring annex shows the scored option and nothing else; an
+     unresolved row reads "Not determined" (required) or "N/A -- not
+     applicable" (conditional).
+   - Findings & Observations carries everything else: why a row was not
+     determined, and every caveat a resolver attached to a scored row (GAP,
+     WARNING, CRITICAL, DISCREPANCY, NOTE, CONFLICT, dismissed namesakes),
+     one line each -- the marker sentence of the note, abbreviation-aware
+     ("plot/survey no. 382" is not a sentence end).
 
-Proof of Address: new bucket address_mismatch (config/scoring_model.json,
-resolvers.py) -- an addition to the scoring model, analyst request 18-Sep
-  addr_ownership_type gains "address_mismatch" -> 0 ("Premises proof is for
-  a different address than the GST registration"). When the electricity
-  bill resolves to a definite not_match, the rental agreement / bill on
-  file proves nothing about the GST-registered premises, so ownership is
-  0 instead of the 1 point "rented" carried (or 4 for an inferred "owned").
-  A sale deed still wins; a minor discrepancy or an inconclusive
-  comparison leaves the usual verdict. addr_rental_validation follows as
-  not_match (0); addr_landlord_declaration becomes undeterminable
-  (conditional, excluded). The bucket is in the workbook dropdown. The
-  electricity-bill resolver now runs before ownership in resolve_all.
+6. OCR time (extract/ocr.py) and API retries (finoscale_api/client.py)
+   - The rotation search reads upright first and stops when that pass is
+     plainly good (>= 120 characters kept at >= 0.4 confidence, mean
+     confidence >= 0.6); the 180 / 90 / 270 passes -- three quarters of a
+     run's OCR time, 20-40 minutes on a 12-page folder -- run only for a
+     page that does not clear the bar (a sideways scan reads as a few
+     garbled tokens). OCR_EARLY_STOP_CHARS / OCR_EARLY_STOP_CONF.
+   - A read timeout is retried once with double the timeout (Ongrid
+     fetch-detailed took > 30 s on MANGAL IRON and seven parameters went
+     unresolved); a 429 is retried once after 5 s (the API sends no
+     Retry-After; a burst limit clears, a quota does not and the second 429
+     is raised as before). Counted in cache_stats["retried"].
 
-Four parser gaps from the Skandan folder
-  - Cancelled cheque: "VALID FOR THREE MONTHS ONLY" was read as the account
-    holder; the FOR line above the signature wins and validity / payee
-    boilerplate is never a name. PRIVATE joins the suffix strip.
-  - Names: an initial stands for a word starting with that letter, so
-    "NAVIN K" is director "KANNUSAMY NAVIN"; dotted initials ("B.R.") are
-    two initials; an initial that is the only difference ("A PERSON" vs
-    "B PERSON") is a disagreement.
-  - Certificate of Incorporation is its own document type (filename and
-    content), parsed for name, CIN, PAN and the spelt-out date of
-    incorporation ("TWENTY NINETH day of NOVEMBER TWO THOUSAND TWENTY
-    THREE" -> 29/11/2023); the CIN it carries is preferred over any regex
-    hit elsewhere; PAN and incorporation date merge from it. It no longer
-    files as a PAN card.
-  - GST certificate: the registration date under "Date of Validity / From"
-    (the current REG-06 layout, where "Date of Liability" is blank) is read;
-    Skandan's 02/01/2024 no longer shows as N/A for the reviewer to keep
-    re-finding.
+7. Three report inconsistencies the reviewer caught on the first run with
+   the above (SYM Singhal Alloys, 21 Sep): "Year Incorporated" now uses the
+   firm's own formation date (Udyam / COI) and falls back to the GST year
+   only without one (2017 -> 2003); a multi-state PAN reads "Multiple
+   active GST registrations -- multi-state operation" instead of "single
+   clean registration"; an ownership row driven by an unreadable bill says
+   the bill could not be read, not that it is for a different address.
 
-Scans with a token text layer (vdd/extract/ocr.py, pipeline.py)
-  A page that is mostly one image with under 300 characters of text is a
-  scan: Skandan's Factory License (62 characters of e-signature stamp over
-  a full-page image) read as digital and was never OCR'd; it is now, and
-  its premises address is cut at the PIN code, before the signatory block.
-  A scanned, filled-in form whose text layer is only the blank template's
-  labels (the KYC form) is re-read by OCR when the expected fields are
-  missing and the pages are image-dominated; the better parse is kept
-  (method "pymupdf_text+easyocr"). On Skandan's handwritten KYC form OCR
-  recovers nothing usable, so it stays POOR -- honestly.
+Scores (deterministic): Sri Laxmi Steel 30 (bill 1 -> 0, bank 1 -> 2),
+B R Trading Co 37 (AML 4 -> 5), Skandan Plastrix 39. SYM Singhal Alloys
+(new folder): 22 with Ongrid fetch-detailed rate-limited (429) -- six
+registry-fed rows unresolved; full run 4 min 24 s including the OpenAI
+review (12,181 in / 2,818 out tokens), against 15-25 min per folder before
+the OCR early stop.
 
-Evidence sub-lines were invisible in every PDF (vdd/report/build_context.py)
-  The annex's evidence/reason line under each row's verdict was styled
-  rgba(255,255,255,.42) -- white at 42%, a dark-panel style -- on the
-  white annex rows, so it had been unreadable in every report since the
-  first commit; the rows were merely taller (B R Trading Co's AML-01
-  sub-line was 7,800 characters of blank). Superseded the same day by
-  item 3 below: the analysts want the option only, so the sub-line is
-  removed rather than recoloured.
+Tests: 196 (was 186 committed) -- OCR early stop (confident upright pass
+reads once, a poor one still tries all four), read-timeout and 429 retries;
+every POA row resolves; the validator
+rejects 'unresolved' on POA rows only; an out-of-options LLM correction is
+escalated; namesake gates (PAN, name, kept when neither, recorded on
+AML-01); the Saraswati Nagar cases (same number = match / different street
+= minor / different number = no match); holder-name mismatch as a note,
+trade-name and suffix matching. Existing tests updated to the new rules.
 
-Zigram findings deduplicated (vdd/aml/zigram_screening.py)
-  summarize_screen returned one line per matched row; a watchlist that is
-  republished monthly matches the same entity once per compilation file
-  (B R Trading Co: the Maharashtra GST non-genuine-dealer list 19 times,
-  each with its own source URL). One line per list + category + status
-  now, with the strongest score, a row count, the first source and a
-  count of the others ("-- 19 matching rows, source=... (+12 more source
-  file(s))"). Feeds the AML note, the review tool and the workbook alike.
-  B R Trading Co's AML section: 7,840 characters -> 1,328; the page 4,577
-  -> 3,382 px.
-
-Six report corrections from the analysts' read of B R Trading Co against
-their own reference report (19-Sep)
-  1. Seller type (resolvers.py): classified from the GST registry's nature
-     of business first, then the Udyam NIC code (division 10-33
-     manufacturing, 38 recovery/processing, 45-47 trade), then the Udyam
-     form's self-declared major activity, then free text; disagreement is
-     stated in the note. B R Trading Co ("Retail Business" on GST, NIC 46620
-     wholesale, Udyam form "Manufacturing") is a Trader (0/4), not a
-     Manufacturer (4/4). An unresolved seller type shows "Unclassified" in
-     the header instead of defaulting to "Trader".
-  2. Electricity bill (resolvers.py): a differing PIN is never a full
-     match. With plot, locality and consumer name all agreeing it is a
-     minor discrepancy (1/2) noted as a likely utility-record error; it used
-     to be "match".
-  3. Annex (build_context.py): each row shows the selected option only; the
-     reasoning stays in the workbook's Evidence column and in the reviewer's
-     "Resolved parameter values" section. The evidence style is gone.
-  4. Bank verification (resolvers.py): "GST match" means the penny-dropped
-     account is the one registered on the GST portal (the bank-details
-     screenshot), as the model and the analysts' reports read it -- not
-     that the holder name matches the legal name. Portal registers the same
-     account -> match (5), even if GSTN shows it NotValidated; a different
-     account -> mismatch (1); no portal screenshot on file -> unavailable
-     (2). A holder-name mismatch stays a CRITICAL mismatch. B R Trading Co:
-     5/5 -> 2/5.
-  5. AML (config/scoring_model.json, resolvers.py, build_context.py): a
-     Zigram hit on a list outside the five slots (state GST non-genuine
-     dealer lists, ESIC defaulters) is scored -- AML-01 -> "adverse_watchlist"
-     (0, an addition to the model) with the hit in the note -- and named in
-     Findings & Observations; the header chip follows the scored rows only,
-     so it can no longer contradict the score. The analyst restores
-     not_listed from the workbook when the match is a namesake.
-  6. Entity Details (build_context.py): the seven rows of the reference
-     report -- Formation Date (Udyam) and Partners / Signatories removed
-     ("partners" leaves REPORT_ENTITY_FIELDS); the address is printed as an
-     address ("135/11/A/2, GIRISH GHOSH ROAD, BELURMATH, Howrah, West
-     Bengal, 711202"), not as the certificate's labelled fields.
-  B R Trading Co: 45 -> 36 (seller type -4, bank -3, bill -1, AML -1).
-
-Tests: 183 -- tests/test_report_location.py (new), four note-only cases in
-tests/test_review_corrections.py, a TANGEDCO bill, cheque holder, initials, COI and
-GST-date cases in tests/test_document_reading_regressions.py, scan detection
-and the OCR retry in tests/test_format_and_cache.py, the address_mismatch
-bucket in tests/test_resolver_branches.py, Zigram dedupe in
-tests/test_zigram_screening.py; tests/test_review_sheet.py gains a layout test (no frozen
-panes, hidden software columns, row height follows note length, analyst
-name read from the Review sheet); the summary-formula test now locates
-cells by column constant rather than letter.
-
-All three real folders regenerated after everything above (deterministic):
-Sri Laxmi Steel 30 (seller type now Trader 0/4 by the GST registry, same
-points as the old unresolved), B R Trading Co 36, Skandan Plastrix 39
-(bank 5 -> 2: no portal screenshot; AML-01 1 -> 0: the ESIC defaulters hit;
-seller type stays Manufacturer -- GST registry says Factory / Manufacturing).
-One page each, footer on it.
-
-Files: config/scoring_model.json, requirements.txt, vdd/aml/zigram_screening.py,
-vdd/extract/classify.py, vdd/extract/consistency.py, vdd/extract/ocr.py,
-vdd/extract/parsers.py, vdd/pipeline.py, vdd/report/assets/template_head.html,
-vdd/report/build_context.py, vdd/report/render.py, vdd/resolve/resolvers.py,
-vdd/review/graph.py, vdd/review/schemas.py, vdd/review_sheet.py;
-tests/test_report_location.py (new), tests/test_document_reading_regressions.py,
-tests/test_format_and_cache.py, tests/test_resolver_branches.py,
-tests/test_review_corrections.py, tests/test_review_sheet.py,
-tests/test_zigram_screening.py.
-
+Files: config/scoring_model.json, vdd/aml/zigram_screening.py,
+vdd/extract/ocr.py, vdd/finoscale_api/client.py, vdd/report/build_context.py,
+vdd/resolve/resolvers.py, vdd/review/graph.py, vdd/review/tools.py,
+vdd/review_sheet.py; tests/test_address_kinds.py,
+tests/test_document_reading_regressions.py, tests/test_format_and_cache.py,
+tests/test_resolver_branches.py, tests/test_review_corrections.py,
+tests/test_review_sheet.py, tests/test_zigram_screening.py.

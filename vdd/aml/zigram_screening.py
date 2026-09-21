@@ -66,6 +66,7 @@ every resolver that uses this module, don't silently overclaim:
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Optional
 
 from vdd.finoscale_api.client import FinoscaleAPIError, FinoscaleClient
@@ -181,12 +182,67 @@ def classify_hit(category: str, row: dict) -> str:
     return "other"
 
 
-def summarize_screen(response: Optional[dict], entity_label: str) -> dict[str, Any]:
+_PAN_RE = re.compile(r'\b([A-Z]{5}[0-9]{4}[A-Z])\b')
+_GSTIN_RE = re.compile(r'\b\d{2}([A-Z]{5}[0-9]{4}[A-Z])\d[A-Z\d]{2}\b')
+
+
+def _row_pans(row: dict) -> set:
+    """PANs the matched record itself carries -- its own PAN field(s) and the
+    PAN embedded in its GSTIN. Zigram's own input echo fields are skipped."""
+    pans = set()
+    for key, val in row.items():
+        kl = key.lower()
+        if kl.startswith("input") or "match" in kl or "client" in kl:
+            continue
+        if not any(t in kl for t in ("pan", "gst", "gstin")):
+            continue
+        text = str(val or "")
+        pans.update(m.group(1) for m in _GSTIN_RE.finditer(text))
+        pans.update(m.group(1) for m in _PAN_RE.finditer(text))
+    return pans
+
+
+def _row_matched_name(row: dict) -> str:
+    for key in ("full_name_db", "Full Name", "Name", "Entity Name", "EntityName"):
+        v = row.get(key)
+        if v and str(v).strip() and str(v).strip().lower() != "none":
+            return str(v).strip()
+    return ""
+
+
+def namesake_reason(row: dict, entity_label: str, vendor_pan: Optional[str]) -> Optional[str]:
+    """Why this hit row is a different entity of the same name, or None if it
+    may be the vendor. Two gates, from the response's own evidence:
+
+    1. The listed record's PAN / GSTIN belongs to someone else. B R Trading
+       Co (PAN AADFB0389G, West Bengal) came back 19 times on Maharashtra's
+       GST non-genuine-dealer list -- every row a different Maharashtra firm
+       with its own GSTIN (27EBDPG9119N1Z7, ...). Zigram matched the name
+       and ignored the PAN we sent (fresh call, 2026-09-21).
+    2. The matched name fails our own initials-aware check: the analysts'
+       Zigram case called "MS R R TRADING COMPANY" a 99% exact match for
+       "B.R. TRADING COMPANY".
+    A row with neither a PAN nor a usable name is kept -- it cannot be
+    cleared, so it stays for the analyst."""
+    pans = _row_pans(row)
+    if vendor_pan and pans and vendor_pan.upper() not in pans:
+        return f"listed entity's PAN {'/'.join(sorted(pans))} is not the vendor's {vendor_pan.upper()}"
+    matched = _row_matched_name(row)
+    if matched:
+        from vdd.extract.consistency import _names_agree
+        if _names_agree(entity_label, matched) is False:
+            return f"matched name '{matched}' is a different name from '{entity_label}'"
+    return None
+
+
+def summarize_screen(response: Optional[dict], entity_label: str, vendor_pan: Optional[str] = None) -> dict[str, Any]:
     """-> {parameter_id_or_'other': [hit summary strings]}, plus
-    '_comprehensive': bool, '_error': str|None. A hit summary always cites
-    the specific list matched, the match confidence, and the source link
-    when Zigram provides one -- never a bare 'found something'."""
-    out: dict[str, Any] = {"_comprehensive": False, "_error": None}
+    '_comprehensive': bool, '_error': str|None, '_dismissed': [namesake
+    lines]. A hit summary always cites the specific list matched, the match
+    confidence, and the source link when Zigram provides one -- never a
+    bare 'found something'. Rows that the response itself shows to be a
+    different entity (see namesake_reason) are dismissed, and said so."""
+    out: dict[str, Any] = {"_comprehensive": False, "_error": None, "_dismissed": []}
     if response is None:
         out["_error"] = "not screened this run"
         return out
@@ -199,13 +255,20 @@ def summarize_screen(response: Optional[dict], entity_label: str) -> dict[str, A
     # (B R Trading Co, 2026-09-19: the Maharashtra GST non-genuine-dealer list
     # 19 times, each with its own source URL -- 7,800 characters in the note).
     groups: dict = {}
+    dismissed: dict = {}
     for category, row in _iter_hit_rows(response):
         # _iter_hit_rows already gates every category (including "Angola
         # Watchlists", present on every response regardless of
         # comprehensiveness) on HitsFound > 0, so a row reaching here is a
-        # real match, not a placeholder -- no further filtering needed.
-        pid = classify_hit(category, row)
+        # real match, not a placeholder.
         list_name = row.get("ListName") or row.get("List Type") or category
+        why = namesake_reason(row, entity_label, vendor_pan)
+        if why:
+            d = dismissed.setdefault(list_name, {"n": 0, "why": set()})
+            d["n"] += 1
+            d["why"].add(why)
+            continue
+        pid = classify_hit(category, row)
         status = row.get("match_status", row.get("FinalStatus", "?"))
         score = row.get("fuzzy_score", row.get("FinalScore", "?"))
         key = (pid, list_name, category, status)
@@ -225,6 +288,9 @@ def summarize_screen(response: Optional[dict], entity_label: str) -> dict[str, A
             if len(g["sources"]) > 1:
                 summary += f" (+{len(g['sources']) - 1} more source file(s))"
         out.setdefault(pid, []).append(summary)
+    for list_name, d in dismissed.items():
+        out["_dismissed"].append(f"{d['n']} row(s) on '{list_name}' dismissed as a namesake -- "
+                                 + "; ".join(sorted(d["why"])))
     return out
 
 

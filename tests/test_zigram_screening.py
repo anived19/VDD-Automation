@@ -146,7 +146,7 @@ def test_summarize_comprehensive_esic_hit_lands_under_other_not_a_scored_paramet
 def test_summarize_comprehensive_clean_response_has_no_hits_anywhere():
     out = summarize_screen(_comprehensive_clean_response(), "a clean entity")
     assert out["_comprehensive"] is True
-    assert set(out.keys()) == {"_comprehensive", "_error"}
+    assert set(out.keys()) == {"_comprehensive", "_error", "_dismissed"}
 
 
 def test_summarize_zero_hit_placeholder_rows_are_never_reported_as_findings():
@@ -198,3 +198,62 @@ def test_repeated_rows_of_one_list_collapse_to_one_line():
     assert gst.count("https://") == 1
     esic = next(x for x in out["other"] if "ESIC" in x)
     assert "matching rows" not in esic and "more source" not in esic
+
+
+# ---------------------------------------------------------------- namesakes (21-Sep)
+def _one_hit(row, entity="B R TRADING CO", pan="AADFB0389G"):
+    resp = {"entitychecks": [{"HitsFound": {"Indian Watchlists": 1}, "Indian Watchlists": [row]}]}
+    return summarize_screen(resp, entity, vendor_pan=pan)
+
+
+def test_row_with_another_entitys_pan_is_dismissed_as_a_namesake():
+    """B R Trading Co (PAN AADFB0389G, West Bengal) came back 19 times on the
+    Maharashtra non-genuine-dealer list -- every row a different firm with
+    its own GSTIN. Fresh Zigram call 2026-09-21: identical."""
+    out = _one_hit({"ListName": "Government of Maharashtra - GST - Non Genuine Dealers", "Name": "B R TRADING",
+                    "GST": "27EBDPG9119N1Z7", "Extracted PAN": "['EBDPG9119N']", "InputClientId": "AADFB0389G",
+                    "fuzzy_score": "100%", "match_status": "Red"})
+    assert "other" not in out and "legal_sanctions" not in out
+    (d,) = out["_dismissed"]
+    assert "EBDPG9119N is not the vendor's AADFB0389G" in d and "1 row(s)" in d
+
+
+def test_row_with_the_vendors_own_pan_is_kept():
+    out = _one_hit({"ListName": "Government of Maharashtra - GST - Non Genuine Dealers", "Name": "B R TRADING CO",
+                    "GST": "19AADFB0389G1ZH", "fuzzy_score": "100%", "match_status": "Red"})
+    assert out["_dismissed"] == [] and len(out["other"]) == 1
+
+
+def test_row_whose_matched_name_is_a_different_name_is_dismissed():
+    """The analysts' own Zigram case: 'MS R R TRADING COMPANY' on the DRT cause
+    list, a 99% 'Exact Match' for M/S. B.R. TRADING COMPANY."""
+    out = _one_hit({"ListName": "Debts Recovery Tribunals (DRTs) - DRT Causelist", "Name": "MS R R TRADING COMPANY",
+                    "fuzzy_score": "99%", "match_status": "Red"}, entity="M/S. B.R. TRADING COMPANY")
+    assert "legal_drt_sarfaesi" not in out
+    assert "different name" in out["_dismissed"][0]
+
+
+def test_row_with_no_pan_and_an_agreeing_name_is_kept():
+    out = _one_hit({"ListName": "Employees State Insurance Corporation (ESIC) - Defaulters List",
+                    "Name": "SKANDAN PLASTRIX PVT LTD", "fuzzy_score": "100%", "match_status": "Red"},
+                   entity="SKANDAN PLASTRIX PRIVATE LIMITED", pan="ABMCS1968D")
+    assert out["_dismissed"] == [] and len(out["other"]) == 1
+
+
+def test_resolve_aml_records_the_dismissals_on_aml01():
+    from vdd.aml import zigram_screening as Z
+    from vdd.resolve.resolvers import ApiBundle, resolve_aml
+    resp = {"entitychecks": [{"HitsFound": {"Indian Watchlists": 2}, "Indian Watchlists": [
+        {"ListName": "Government of Maharashtra - GST - Non Genuine Dealers", "Name": "B R TRADING",
+         "GST": "27EBDPG9119N1Z7", "fuzzy_score": "100%", "match_status": "Red"},
+        {"ListName": "Government of Maharashtra - GST - Non Genuine Dealers", "Name": "B R TRADING",
+         "GST": "27CGYPG7879K1Z5", "fuzzy_score": "100%", "match_status": "Red"}]}]}
+    real = Z.is_comprehensive
+    Z.is_comprehensive = lambda r: True
+    try:
+        out = resolve_aml(ApiBundle(zigram=resp), "B R TRADING CO", [], vendor_pan="AADFB0389G")
+    finally:
+        Z.is_comprehensive = real
+    r = out["legal_sanctions"]
+    assert r.value == "not_listed" and "Zigram namesakes dismissed: 2 row(s)" in r.note
+    assert all(out[k].value in ("not_listed", "no_pep", "no_criminal", "no_drt") for k in out)

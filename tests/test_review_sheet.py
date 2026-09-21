@@ -92,7 +92,10 @@ def test_workbook_has_every_parameter_with_dropdown_and_preview(tmp_path):
     assert len(ws.data_validations.dataValidation) == len(pids)
     # a category param's dropdown lists its buckets plus 'unresolved'
     dv = next(d for d in ws.data_validations.dataValidation if "owned" in str(d.formula1))
-    assert '"owned,leased,rented,address_mismatch,unresolved"' == dv.formula1
+    assert '"owned,leased,rented,address_mismatch"' == dv.formula1     # Proof of Address rows: no 'unresolved'
+    com_row = next(r for r in ws.iter_rows() if r[C_PID - 1].value == "com_gstin_active")
+    com_dv = next(d for d in ws.data_validations.dataValidation if str(com_row[C_ANALYST - 1].coordinate) in str(d.sqref))
+    assert com_dv.formula1.endswith(',unresolved"')                       # other sections keep it
     # numeric params get a decimal rule and a nested-IF preview
     specs = param_specs(engine.model)
     assert specs["com_gst_delay_days"].numeric and specs["com_gst_vintage"].numeric
@@ -312,3 +315,11 @@ def test_workbook_layout_is_readable(tmp_path):
     wb.save(path)
     assert read_review_workbook(path).analyst_name == "R. Iyer"
     assert not ws[ANALYST_CELL].protection.locked
+
+
+def test_validator_rejects_unresolved_on_proof_of_address_rows(tmp_path):
+    engine, entity, resolved, docs = _vendor()
+    path, _ = _write(tmp_path, engine, entity, resolved, docs)
+    _edit(path, {"addr_electricity_bill": ("unresolved", "cannot tell"), "com_gstin_active": ("unresolved", "portal down")})
+    problems = validate_review_sheet(read_review_workbook(path), engine.model)
+    assert len(problems) == 1 and "addr_electricity_bill" in problems[0] and "cannot be 'unresolved'" in problems[0]

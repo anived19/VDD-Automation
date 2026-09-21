@@ -111,3 +111,20 @@ def test_field_correction_without_a_value_is_escalated(monkeypatch):
     out = graph.apply_corrections(_state([_correct("date_of_registration", value=None)], monkeypatch=monkeypatch))
     assert out["corrections_applied"] == [] and len(out["escalations"]) == 1
     assert "date_of_registration" not in out["entity"]
+
+
+def test_correction_to_a_value_outside_the_rows_options_is_escalated(monkeypatch):
+    """An unknown bucket would score as unresolved -- never applied."""
+    from vdd.resolve.resolvers import Resolved
+    st = _state([_correct_param("addr_electricity_bill", "unresolved")], monkeypatch=monkeypatch)
+    st["scoring_model_path"] = "config/scoring_model.json"
+    st["resolved"] = {"addr_electricity_bill": Resolved.ok("match", "bill vs gst")}
+    out = graph.apply_corrections(st)
+    assert out["corrections_applied"] == [] and len(out["escalations"]) == 1
+    assert "not one of" in out["escalations"][0]["reason"]
+    assert out["resolved"]["addr_electricity_bill"].value == "match"
+    # a valid bucket still applies
+    st = _state([_correct_param("addr_electricity_bill", "not_match")], monkeypatch=monkeypatch)
+    st["scoring_model_path"] = "config/scoring_model.json"
+    st["resolved"] = {"addr_electricity_bill": Resolved.ok("match", "bill vs gst")}
+    assert graph.apply_corrections(st)["resolved"]["addr_electricity_bill"].value == "not_match"

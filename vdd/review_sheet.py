@@ -59,6 +59,10 @@ from vdd.score.engine import NO_CONSENT_CATEGORY_IDS, ScoreResult, _CMP, _EQ_NUM
 
 FONT = "Calibri"
 UNRESOLVED = "unresolved"
+# Categories whose rows always resolve to one of the model's options -- the
+# analysts' rule for Proof of Address (2026-09-21): match or no match, never
+# "unresolved". Their dropdowns omit it and the validator rejects it.
+NO_UNRESOLVED_CATEGORIES = ("proof_of_address",)
 IGNORE_DOC = "ignore"
 SOURCE_LLM = "llm-review"
 SOURCE_ANALYST = "analyst"
@@ -344,7 +348,9 @@ def write_review_workbook(path: str, *, vendor_name: str, entity: dict, resolved
                 dv.error = "Enter a number (or leave blank to keep the system value)."
                 dv.prompt = "A number, e.g. 3.5"
             else:
-                choices = [b[0] for b in (spec.buckets if spec else [])] + [UNRESOLVED]
+                choices = [b[0] for b in (spec.buckets if spec else [])]
+                if spec is None or spec.category_id not in NO_UNRESOLVED_CATEGORIES:
+                    choices.append(UNRESOLVED)
                 preview = (f'=IF({ref}="",{get_column_letter(C_SCORE)}{row},IF(LOWER({ref})="{UNRESOLVED}",0,'
                            f'IFERROR(INDEX({S_CHOICES}!$E:$E,MATCH(${get_column_letter(C_PID)}{row}&"|"&LOWER({ref}),'
                            f'{S_CHOICES}!$A:$A,0)),0)))')
@@ -718,6 +724,9 @@ def validate_review_sheet(sheet: ReviewSheet, model: dict) -> list[str]:
             continue
         text = _cell_str(raw).lower()
         if text == UNRESOLVED:
+            if spec.category_id in NO_UNRESOLVED_CATEGORIES:
+                problems.append(f"Review: {pid} cannot be 'unresolved' -- Proof of Address rows take one of "
+                                f"{', '.join(b[0] for b in spec.buckets)}")
             continue
         if spec.numeric:
             try:

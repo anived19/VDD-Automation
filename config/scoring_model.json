@@ -374,14 +374,14 @@
             },
             {
               "expr": "value == \"address_mismatch\"",
-              "condition": "Premises proof is for a different address than the GST registration",
+              "condition": "Not established — premises proof missing, in a third party's name, or for a different address",
               "assignedScore": 0
             }
           ],
           "scoringMethod": "range",
           "inputFieldName": "addr_ownership_type",
           "maxParameterScore": 5,
-          "parameterDescription": "From sale deed / property tax / rental agreement. Submit: owned | leased | rented | address_mismatch (added 2026-09-18: the bill / agreement on file is for premises other than the GST-registered address, so it proves nothing about them)",
+          "parameterDescription": "From sale deed / property tax / rental agreement. Submit: owned | leased | rented | address_mismatch (added 2026-09-18, widened 2026-09-21: the premises proof on file is missing, in a third party's name, or for premises other than the GST-registered address -- it does not establish the status of the registered premises. Proof of Address never scores 'unresolved': every row resolves to one of its options)",
           "parameterWeightWithinCategory": 1
         },
         {

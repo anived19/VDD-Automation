@@ -30,9 +30,10 @@ def test_landlord_present_when_doc_on_file():
     assert r.value == "present"
 
 
-def test_landlord_unresolved_when_ownership_unknown():
+def test_landlord_absent_when_ownership_unknown():
+    """Proof of Address never scores 'unresolved' (analysts' rule, 21-Sep)."""
     r = resolve_addr_landlord_declaration(Resolved.missing("no docs"), has_landlord_doc=False)
-    assert r.unresolved
+    assert r.value == "absent" and not r.unresolved and "not established" in r.note
 
 
 def test_ownership_owned_via_sale_deed_is_confirmed_not_inferred():
@@ -55,7 +56,7 @@ def test_ownership_not_inferred_when_bill_is_in_a_third_partys_name():
     entity = {"legal_name": "VEER SHETTY SHIVALLA", "trade_name": "SRI LAXMI STEEL",
               "electricity_bill_consumer_name": "M/S DEVI ENGINEERING WORKS"}
     r = resolve_addr_ownership_type(False, True, entity=entity)
-    assert r.unresolved
+    assert r.value == "address_mismatch" and not r.unresolved   # the 0 option, never 'unresolved'
     assert "GAP:" in r.note and "DEVI ENGINEERING WORKS" in r.note and "rental agreement" in r.note
 
 
@@ -167,12 +168,24 @@ def test_bank_live_penny_drop_is_gst_match_only_when_the_portal_registers_that_a
     assert r.value == "penny_success_gst_mismatch" and "different account" in r.note
 
 
-def test_bank_live_penny_drop_name_mismatch():
-    e = dict(_BASE_BANK, legal_name="Dinesh Polymers")
+def test_bank_live_penny_drop_name_mismatch_is_a_critical_note_not_the_gst_mismatch_bucket():
+    """'GST mismatch' means the portal registers a different account. A holder
+    name matching none of the vendor's names is a CRITICAL note (findings),
+    and without a portal screenshot the bucket is 'GST unavailable'."""
+    e = dict(_BASE_BANK, legal_name="Dinesh Polymers", trade_name="Dinesh Polymers", partners=["RAM DINESH"])
     api = ApiBundle(bank_verification={"bank_account_data": {"name": "SOME OTHER ENTITY ENTIRELY"}})
     r = resolve_com_bank_verification(e, api)
-    assert r.value == "penny_success_gst_mismatch" and not r.unresolved
-    assert "CRITICAL" in r.note
+    assert r.value == "penny_success_gst_unavailable" and not r.unresolved
+    assert "CRITICAL" in r.note and "none of the vendor's names" in r.note
+    # a proprietorship's account in the trade name or the proprietor's name is fine
+    e = dict(_BASE_BANK, legal_name="VEER SHETTY SHIVALLA", trade_name="SRI LAXMI STEEL", partners=["SHIVALLA VEER SHETTY"])
+    api = ApiBundle(bank_verification={"bank_account_data": {"name": "SRI LAXMI STEEL"}})
+    r = resolve_com_bank_verification(e, api)
+    assert r.value == "penny_success_gst_unavailable" and "CRITICAL" not in r.note
+    # suffix spelling is not a mismatch
+    e = dict(_BASE_BANK, legal_name="MANGAL IRON PRIVATE LIMITED")
+    api = ApiBundle(bank_verification={"bank_account_data": {"name": "MANGAL IRON PVT.LTD."}})
+    assert "CRITICAL" not in resolve_com_bank_verification(e, api).note
 
 
 def test_bank_live_penny_drop_gst_unavailable_when_no_legal_name():
@@ -273,7 +286,7 @@ def test_premises_proof_for_a_different_address_scores_zero_not_rented():
     own = resolve_addr_ownership_type(True, True, entity={}, electricity=not_match)
     assert own.value == "address_mismatch" and "different address" in own.note
     assert resolve_addr_rental_validation(own, not_match).value == "not_match"
-    assert resolve_addr_landlord_declaration(own).unresolved
+    assert resolve_addr_landlord_declaration(own).value == "absent"
     engine = ScoringEngine("config/scoring_model.json")
     scored = {p.parameter_id: p for c in engine.score_no_consent({"addr_ownership_type": own}).categories for p in c.params}
     assert scored["addr_ownership_type"].assigned_score == 0 and not scored["addr_ownership_type"].unresolved
@@ -313,7 +326,7 @@ def test_zigram_watchlist_hit_outside_the_five_slots_scores_aml01_zero():
             "_comprehensive": True}
     import vdd.aml.zigram_screening as Z
     monkey = Z.summarize_screen
-    Z.summarize_screen = lambda resp, label: dict(fake)
+    Z.summarize_screen = lambda resp, label, vendor_pan=None: dict(fake)
     try:
         out = resolve_aml(ApiBundle(zigram={"x": 1}), "B R TRADING CO", [])
     finally:
@@ -325,3 +338,28 @@ def test_zigram_watchlist_hit_outside_the_five_slots_scores_aml01_zero():
     scored = {p.parameter_id: p for c in engine.score_no_consent(out).categories for p in c.params}
     assert scored["legal_sanctions"].assigned_score == 0 and not scored["legal_sanctions"].unresolved
     assert "watchlist" in scored["legal_sanctions"].matched_condition.lower()
+
+
+# ---------------------------------------------------------------- Proof of Address never 'unresolved' (21-Sep)
+def test_every_proof_of_address_row_resolves_to_an_option():
+    """The analysts' rule: match or no match, never 'unresolved'. Missing,
+    unreadable or incomparable evidence lands on the row's 0 option with the
+    reason in the note."""
+    from vdd.resolve.resolvers import (resolve_addr_electricity_bill, resolve_addr_landlord_declaration,
+                                       resolve_addr_msme, resolve_addr_ownership_type, resolve_addr_rental_validation)
+    # POA-02: no bill, no GST address, nothing comparable
+    for r in (resolve_addr_electricity_bill("GST addr", None, None),
+              resolve_addr_electricity_bill(None, "bill addr", None),
+              resolve_addr_electricity_bill("Plot 5 MIDC Pune 411026", "Door 12 Kittampalayam", None)):
+        assert r.value == "not_match" and not r.unresolved and r.note
+    # POA-01: nothing on file -> the 0 option
+    own = resolve_addr_ownership_type(False, False, entity={})
+    assert own.value == "address_mismatch" and not own.unresolved and "GAP" in own.note
+    # POA-03 / POA-05 follow
+    assert resolve_addr_rental_validation(own, Resolved.missing("")).value == "not_match"
+    assert resolve_addr_landlord_declaration(own).value == "absent"
+    rented = Resolved.ok("rented", "doc")
+    assert resolve_addr_rental_validation(rented, Resolved.ok("minor_discrepancy", "x")).value == "minor_discrepancy"
+    assert resolve_addr_rental_validation(rented, Resolved.ok("not_match", "x")).value == "not_match"
+    # POA-04: no API, no certificate
+    assert resolve_addr_msme(ApiBundle(), None).value == "not_valid"

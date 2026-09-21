@@ -251,3 +251,78 @@ def test_pipeline_rereads_a_scanned_form_by_ocr_when_the_text_layer_is_only_labe
     assert read.method == "pymupdf_text+easyocr" and read.quality == "read"
     assert "OCR'd from the page image" in read.reason
     assert entity.get("gstin") == "27ABCDE1234F1Z5"
+
+
+# ------------------------------------------------- OCR early stop and client retries (21-Sep)
+def test_confident_upright_pass_skips_the_other_rotations(monkeypatch):
+    calls = []
+
+    class _Reader:
+        def readtext(self, arr, detail=1):
+            calls.append(1)
+            # a plainly good upright read: 200 chars at 0.9
+            return [([[0, 0], [1, 0], [1, 1], [0, 1]], "GSTIN 27ABCDE1234F1Z5 " * 9, 0.9)]
+    monkeypatch.setattr(ocr, "_get_easyocr_reader", lambda langs: _Reader() if langs == ["en"] else None)
+    from PIL import Image
+    text, score, angle = ocr._easyocr_best_rotation(Image.new("RGB", (40, 40), "white"))
+    assert len(calls) == 1 and angle == 0 and score > 0
+
+
+def test_poor_upright_pass_still_tries_every_rotation(monkeypatch):
+    calls = []
+
+    class _Reader:
+        def readtext(self, arr, detail=1):
+            calls.append(1)
+            return [([[0, 0], [1, 0], [1, 1], [0, 1]], "x7q", 0.45)]      # a sideways page's garble
+    monkeypatch.setattr(ocr, "_get_easyocr_reader", lambda langs: _Reader() if langs == ["en"] else None)
+    from PIL import Image
+    ocr._easyocr_best_rotation(Image.new("RGB", (40, 40), "white"))
+    assert len(calls) == 4
+
+
+def test_read_timeout_is_retried_once_with_a_longer_timeout(tmp_path):
+    class _S:
+        def __init__(self):
+            self.timeouts = []
+
+        def request(self, *a, **k):
+            self.timeouts.append(k["timeout"])
+            if len(self.timeouts) == 1:
+                raise requests.ReadTimeout("slow")
+            return _Resp({"data": {"ok": 1}})
+    s = _S()
+    c = _client(tmp_path, s)
+    assert c._cached("/api/t") == {"ok": 1}
+    assert s.timeouts == [c.timeout, c.timeout * 2] and c.cache_stats["retried"] == 1
+
+
+def test_429_is_retried_once_after_a_pause(tmp_path, monkeypatch):
+    class _S:
+        def __init__(self):
+            self.calls = 0
+
+        def request(self, *a, **k):
+            self.calls += 1
+            return _Resp({"message": "API rate limit exceeded"}, status=429) if self.calls == 1 else _Resp({"data": {"ok": 1}})
+    s = _S()
+    c = _client(tmp_path, s, retry_after_429=0)
+    assert c._cached("/api/t") == {"ok": 1} and s.calls == 2
+
+    class _Always429:
+        def request(self, *a, **k):
+            return _Resp({"message": "API rate limit exceeded"}, status=429)
+    c = _client(tmp_path, _Always429(), retry_after_429=0)
+    with pytest.raises(Exception) as e:
+        c._cached("/api/u")
+    assert "429" in str(e.value)
+
+
+def test_stale_entry_served_when_the_refetch_is_rate_limited(tmp_path):
+    class _Always429:
+        def request(self, *a, **k):
+            return _Resp({"message": "API rate limit exceeded"}, status=429)
+    c = _client(tmp_path, _Always429(), retry_after_429=0)
+    _seed(c, 10, {"data": {"status": "cached"}})
+    assert c._cached("/api/t") == {"status": "cached"}
+    assert c.cache_stats["stale_served_offline"] == 1

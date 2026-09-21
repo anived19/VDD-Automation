@@ -46,12 +46,45 @@ _ENTITY_TYPE_LABEL = {
 
 
 
-def _headline(note: str) -> str:
-    """First sentence of a resolver note, used as the row's headline when there
-    is no scored condition label to show."""
-    note = note.strip()
-    m = re.match(r'(.{0,120}?[.;])\s', note)
-    return (m.group(1) if m else (note[:120] + ("..." if len(note) > 120 else ""))).strip()
+_NOTE_MARKER = re.compile(r'\b(GAP|WARNING|CRITICAL|DISCREPANCY|NOTE|CONFLICT|WATCHLIST HIT|namesakes dismissed)\b')
+
+
+_ABBREV = ("no", "nos", "vs", "pvt", "ltd", "co", "mr", "mrs", "ms", "dr", "sy", "sf", "st", "rd", "e.g", "i.e")
+
+
+def _sentences(text: str) -> list:
+    """Split on '. ' / '; ' but not after an abbreviation ('plot/survey no. 382')
+    or inside a number ('86149.5')."""
+    text = re.sub(r'\s+', ' ', text.strip())
+    out, start = [], 0
+    for m in re.finditer(r'[.;]\s', text):
+        before = text[start:m.start()]
+        last = re.split(r'[\s/(]', before)[-1].lower().rstrip('.')
+        if m.group(0)[0] == "." and (last in _ABBREV or (text[m.end():m.end() + 1].isdigit())):
+            continue
+        out.append(text[start:m.end()].strip())
+        start = m.end()
+    if text[start:].strip():
+        out.append(text[start:].strip())
+    return out
+
+
+def _headline(note: str, limit: int = 260, marker: bool = False) -> str:
+    """The sentence of a resolver note that Findings & Observations shows: the
+    first sentence, or (marker=True) the first sentence carrying a GAP /
+    WARNING / CRITICAL / DISCREPANCY / NOTE / CONFLICT marker, plus the one
+    after it if it is short."""
+    sents = _sentences(note)
+    if not sents:
+        return ""
+    idx = 0
+    if marker:
+        idx = next((i for i, s_ in enumerate(sents) if _NOTE_MARKER.search(s_)), 0)
+    text = sents[idx]
+    if idx + 1 < len(sents) and len(text) + len(sents[idx + 1]) <= limit:
+        text = f"{text} {sents[idx + 1]}"
+    text = text.strip().lstrip("|-").strip().rstrip(";.").strip()
+    return text[:limit] + ("..." if len(text) > limit else "")
 
 
 def _code_rows(cat: CategoryScore) -> list:
@@ -65,25 +98,13 @@ def _code_rows(cat: CategoryScore) -> list:
     rows = []
     for i, p in enumerate(cat.params, start=1):
         code = f"{prefix}-{i:02d}"
-        detail = ""
+        # The scoring annex shows the option that was scored and nothing else
+        # (analysts' rule, 2026-09-21); every reason, caveat and warning goes
+        # to Findings & Observations (see _findings) and the workbook.
         if p.unresolved:
-            if p.note:
-                head, rest = _headline(p.note), ""
-                if len(p.note.strip()) > len(head):
-                    rest = p.note.strip()[len(head):].strip()
-                result = esc(head)
-                detail = rest
-            else:
-                result = ("N/A &mdash; not applicable" if p.max_score == 0 else
-                           "Not yet verified &mdash; pending automated check")
+            result = "N/A &mdash; not applicable" if p.max_score == 0 else "Not determined"
         else:
             result = esc(p.matched_condition or str(p.value))
-            detail = p.note or ""
-        # The delivered annex shows the option that was selected and nothing
-        # more (analyst request 2026-09-19, matching their own reports); the
-        # reasoning lives in the workbook's Evidence column and in the
-        # reviewer's "Resolved parameter values" section.
-        del detail
         rows.append((code, esc(p.parameter_name), result))
     return rows
 
@@ -151,6 +172,9 @@ def _findings(result: ScoreResult, entity: dict = None) -> list:
     if mr is not None and not mr.unresolved and mr.value == "cancelled_present":
         out.append(("n", "Cancelled GST registrations found on the entity PAN &mdash; "
                           + esc(mr.note or "see scoring detail")))
+    elif mr is not None and not mr.unresolved and mr.value == "active_multi_state":
+        out.append(("c", "Multiple active GST registrations on the entity PAN &mdash; multi-state operation"
+                          + (f" ({esc(_headline(mr.note))})" if mr.note else "")))
     else:
         add(com, "com_multiple_registrations", "No additional registrations on entity PAN &mdash; "
             "single clean registration", "GST registrations on PAN: {v}",
@@ -209,6 +233,26 @@ def _findings(result: ScoreResult, entity: dict = None) -> list:
         out.append(("n", f"{len(aml_missing)} of {len(aml.params)} Legal/AML registers could not be screened "
                           "automatically this run &mdash; NOT counted as clean; see AML rows for why"))
 
+    # Everything the scoring annex no longer says: why a row was not
+    # determined, and every caveat a resolver attached to a scored row
+    # (GAP / WARNING / CRITICAL / DISCREPANCY / NOTE / CONFLICT / dismissed
+    # namesakes). One line each, here and nowhere else in the PDF.
+    seen = {t for _k, t in out}
+    for cat in (com, poa, poi, aml):
+        for p in cat.params:
+            note = (p.note or "").strip()
+            if p.unresolved:
+                if p.max_score > 0 and note:
+                    line = f"{esc(p.parameter_name)} &mdash; not determined: {esc(_headline(note))}"
+                else:
+                    continue
+            elif _NOTE_MARKER.search(note):
+                line = f"{esc(p.parameter_name)}: {esc(_headline(note, marker=True))}"
+            else:
+                continue
+            if line not in seen:
+                out.append(("n", line))
+                seen.add(line)
     return out
 
 
@@ -401,9 +445,15 @@ def build_context(entity: dict, result: ScoreResult, report_date: str = None) ->
     # Custom Instructions rule 3: the Year Incorporated field and the vintage
     # score stay anchored to the GST registration date. The true formation date
     # (Udyam / PAN) is recorded separately and only referenced in the narrative.
+    # The firm's own formation date (Udyam / Certificate of Incorporation)
+    # when known; the GST registration year is only a stand-in for it. The
+    # reviewer caught "Year Incorporated 2017" against a 2003 formation date
+    # (SYM Singhal Alloys, 2026-09-21).
     year_incorp = ""
-    if entity.get("date_of_registration"):
-        year_incorp = entity["date_of_registration"].split("/")[-1].split("-")[0]
+    for key in ("date_of_incorporation", "date_of_registration"):
+        if entity.get(key):
+            year_incorp = str(entity[key]).split("/")[-1].split("-")[0]
+            break
 
     addr = entity.get("address", "")
     loc = _location(addr) if addr else (entity.get("state") or "N/A")

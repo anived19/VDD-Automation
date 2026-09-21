@@ -40,6 +40,8 @@ class FinoscaleClient:
     # a GSTIN cancelled last week still read "Active" from a months-old cache
     # entry, with nothing in the report to say so. 0 disables expiry.
     cache_max_age_days: float = 7.0
+    # Pause before the single retry of a 429 (seconds).
+    retry_after_429: float = 5.0
     # Hits and refetches this client has served, for the run summary.
     cache_stats: dict = field(default_factory=lambda: {"hits": 0, "stale_refetched": 0, "fetched": 0})
     session: requests.Session = field(default_factory=requests.Session)
@@ -70,8 +72,7 @@ class FinoscaleClient:
         url = self.base_url.rstrip("/") + path
         headers = {"X-Api-Key": self.api_key, "Content-Type": "application/json"}
         try:
-            resp = self.session.request(method, url, params=params, json=json_body,
-                                         headers=headers, timeout=self.timeout)
+            resp = self._send(method, url, params, json_body, headers)
         except requests.RequestException:
             if stale is not None:
                 # The network failed and we hold an expired answer: an old fact
@@ -85,6 +86,12 @@ class FinoscaleClient:
             data = {"raw": resp.text}
 
         if resp.status_code >= 400:
+            if stale is not None and resp.status_code in (429, 500, 502, 503, 504):
+                # The refetch of an expired entry was rate-limited or the API
+                # is down: the old answer beats an unresolved parameter, and it
+                # is served as what it is (the run warns "EXPIRED cache").
+                self.cache_stats["stale_served_offline"] = self.cache_stats.get("stale_served_offline", 0) + 1
+                return stale["data"]
             msg = data.get("message") if isinstance(data, dict) else str(data)
             raise FinoscaleAPIError(resp.status_code, msg or "request failed", path, data)
         self.cache_stats["stale_refetched" if stale is not None else "fetched"] += 1
@@ -94,6 +101,27 @@ class FinoscaleClient:
                 json.dump({"_fetched_at": time.time(), "_path": path, "_params": params,
                            "_json_body": json_body, "data": data}, f, indent=2)
         return data
+
+    def _send(self, method, url, params, json_body, headers):
+        """One retry for the two transient failures seen on the PPE API: a
+        read timeout (Ongrid fetch-detailed took >30 s on MANGAL IRON,
+        2026-09-19, and seven parameters went unresolved for it) is retried
+        once with double the timeout; a 429 is retried once after a short
+        pause (a burst limit clears; a quota does not, and the second 429 is
+        then raised as usual). The API sends no Retry-After header."""
+        try:
+            resp = self.session.request(method, url, params=params, json=json_body,
+                                         headers=headers, timeout=self.timeout)
+        except requests.ReadTimeout:
+            self.cache_stats["retried"] = self.cache_stats.get("retried", 0) + 1
+            resp = self.session.request(method, url, params=params, json=json_body,
+                                         headers=headers, timeout=self.timeout * 2)
+        if resp.status_code == 429:
+            self.cache_stats["retried"] = self.cache_stats.get("retried", 0) + 1
+            time.sleep(self.retry_after_429)
+            resp = self.session.request(method, url, params=params, json=json_body,
+                                         headers=headers, timeout=self.timeout)
+        return resp
 
     def _cached(self, path: str, params: dict = None, json_body: dict = None, unwrap_data: bool = True):
         raw = self._request("GET" if json_body is None else "POST", path,

@@ -59,10 +59,14 @@ def test_bill_with_a_different_kind_of_number_says_cannot_compare():
 def test_pin_alone_is_not_a_match():
     r = resolve_addr_electricity_bill("Plot 12 Kittampalayam Coimbatore PIN 641402", "xxxx 641402", "641402")
     assert r.value == "minor_discrepancy"
-    assert "PIN 641402 matches but nothing else does" in r.note and "may not have been read" in r.note
-    # PIN + locality, or PIN + premises, is still a match
+    assert "only the PIN agrees" in r.note and "may not have been read" in r.note
+    # PIN + locality without a comparable premises number is partial evidence -- minor, not a
+    # full match (analysts' rule 21-Sep: only a 100% match is a match); PIN + premises + locality is
     r = resolve_addr_electricity_bill("Plot 12 Kittampalayam Coimbatore PIN 641402",
                                       "Kittampalayam 641402", "641402")
+    assert r.value == "minor_discrepancy"
+    r = resolve_addr_electricity_bill("Plot 12 Kittampalayam Coimbatore PIN 641402",
+                                      "Plot 12 Kittampalayam 641402", "641402")
     assert r.value == "match"
 
 

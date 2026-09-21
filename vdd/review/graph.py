@@ -22,6 +22,7 @@ import copy
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, Optional
 
@@ -259,6 +260,28 @@ def llm_review(state: ReviewState) -> dict:
     }
 
 
+def _bucket_values(model_path: str, pid: str):
+    """The category values a parameter accepts (lower-cased), or None for a
+    numeric parameter / unknown id."""
+    try:
+        with open(model_path, encoding="utf-8") as fh:
+            model = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    for cat in model.get("categories", []):
+        for p in cat.get("parameters", []):
+            if p.get("parameterId") == pid:
+                if p.get("inputType") != "category":
+                    return None
+                vals = set()
+                for sm in p.get("scoreMappings", []):
+                    m = re.match(r'value\s*==\s*"([^"]+)"', sm.get("expr", ""))
+                    if m:
+                        vals.add(m.group(1).lower())
+                return vals or None
+    return None
+
+
 def apply_corrections(state: ReviewState) -> dict:
     resolved = copy.deepcopy(state["resolved"])
     entity = copy.deepcopy(state["entity"])
@@ -290,6 +313,14 @@ def apply_corrections(state: ReviewState) -> dict:
                     resolved[pid] = Resolved.ok(before.value, source="llm-review",
                                                  note=f.get("proposed_note", "") or before.note)
                 else:
+                    allowed = _bucket_values(state["scoring_model_path"], pid)
+                    if allowed is not None and str(proposed).strip().lower() not in allowed:
+                        # An unknown bucket would score as unresolved -- the one
+                        # thing a correction must never manufacture.
+                        record["reason"] = (f"proposed_value {proposed!r} is not one of {pid}'s options "
+                                            f"({', '.join(sorted(allowed))}) -- escalated instead")
+                        escalations.append(record)
+                        continue
                     resolved[pid] = Resolved.ok(proposed, source="llm-review", note=f.get("proposed_note", ""))
                 corrections.append(record)
             elif field in REPORT_ENTITY_FIELDS:

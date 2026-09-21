@@ -253,12 +253,12 @@ def test_ocr_run_together_place_name_still_matches():
     assert not _place_overlap({"road"}, {"broadway"})
 
 
-def test_adjacent_plot_in_same_estate_is_minor_discrepancy_for_the_right_reason():
+def test_adjacent_plot_in_same_estate_is_not_match_for_the_right_reason():
     gst = ("Floor No.: survey no 305 306 308 Building No./Flat No.: plot no 384 385 "
            "Name Of Premises/Building: s v co op industrial estate Locality/Sub Locality: ida jeedimetla "
            "City/Town/Village: Hyderabad State: Telangana PIN Code: 500055")
     r = resolve_addr_electricity_bill(gst, "PLNO ३८२ SVCIE PHASE २ I .D AJJEEDIMETLA,", None)
-    assert r.value == "minor_discrepancy" and "jeedimetla" in r.note and "(name)" not in r.note
+    assert r.value == "not_match" and "jeedimetla" in r.note and "(name)" not in r.note
 
 
 def test_same_premises_with_utility_pin_off_by_one_is_a_minor_discrepancy():
@@ -320,15 +320,29 @@ def test_bare_small_numbers_are_not_premises_identifiers():
     assert "2" not in prem and "384" in prem
 
 
-def test_different_plot_in_same_estate_is_a_discrepancy_not_a_match():
+def test_different_plot_in_same_estate_is_no_match():
+    """Founder's rule (21-Sep): a different plot / house number is a different
+    address -- 155 Saraswati Nagar is not 157 -- even with locality and PIN
+    agreeing. It was capped at minor_discrepancy before."""
     conflict, gst_plots, bill_plots = _plots_conflict(_GST_ADDR, _BILL_ADDR)
     assert conflict and bill_plots == {"382"}
     r = resolve_addr_electricity_bill(_GST_ADDR, _BILL_ADDR, None)
-    assert r.value == "minor_discrepancy"
+    assert r.value == "not_match"
     assert "DISCREPANCY" in r.note and "382" in r.note and "384/385" in r.note and "jeedimetla" in r.note
-    # even with the PINs agreeing, a different plot is never a full match
     r = resolve_addr_electricity_bill(_GST_ADDR, _BILL_ADDR + " 500055", "500055")
-    assert r.value == "minor_discrepancy" and "PIN 500055 matches" in r.note
+    assert r.value == "not_match" and "PIN 500055 matches" in r.note
+
+
+def test_same_number_different_street_name_is_a_minor_discrepancy():
+    """15 Saraswati Nagar 'on University Road' vs 'on Patel Nagar Road': one
+    place described two ways -- minor, not no-match."""
+    gst = "Plot No. 15, Saraswati Nagar, University Road, Nagpur, Maharashtra, 440022"
+    r = resolve_addr_electricity_bill(gst, "PLOT 15 SARASWATI NAGAR PATEL NAGAR ROAD NAGPUR", "440022")
+    assert r.value == "match"                      # number, locality (saraswati/nagar/nagpur) and PIN agree
+    r = resolve_addr_electricity_bill(gst, "PLOT 15 CITY CENTRE MAIN ROAD", "440022")
+    assert r.value == "minor_discrepancy" and "named differently" in r.note
+    r = resolve_addr_electricity_bill(gst, "PLOT 17 SARASWATI NAGAR UNIVERSITY ROAD NAGPUR", "440022")
+    assert r.value == "not_match"
 
 
 def test_same_plot_still_matches():
